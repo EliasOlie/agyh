@@ -35,7 +35,28 @@ const (
 	modeProject
 )
 
-var agents = []string{"", "agy", "claude", "codex"}
+// allAgents is the Tab cycle; agents with no indexed session are skipped.
+var allAgents = []string{"agy", "claude", "codex"}
+
+// debounce is how long typing must pause before a search runs.
+const debounce = 120 * time.Millisecond
+
+// Options configures the browser.
+type Options struct {
+	Query   string
+	Project string
+	// Remote describes chat channels for the footer, e.g. "telegram ✓  whatsapp ✗".
+	// Empty means none is connected, and the footer shows how to connect one.
+	Remote string
+}
+
+type debounceMsg struct{ seq int }
+
+type resultsMsg struct {
+	seq  int
+	hits []store.Hit
+	err  error
+}
 
 var (
 	accent    = lipgloss.AdaptiveColor{Light: "#5A3FD6", Dark: "#A78BFA"}
@@ -57,6 +78,10 @@ type Model struct {
 	ctx     context.Context
 	st      *store.Store
 	project string
+	remote  string
+	agents  []string // "" (all) + agents that have sessions
+	seq     int      // latest search request; older results are dropped
+	loading bool
 
 	search  textinput.Model
 	prompt  textinput.Model
@@ -74,24 +99,36 @@ type Model struct {
 	current *store.Hit
 }
 
-// New builds the TUI. project optionally restricts it to one project.
-func New(ctx context.Context, st *store.Store, initialQuery, project string) *Model {
+// New builds the TUI.
+func New(ctx context.Context, st *store.Store, o Options) *Model {
 	in := textinput.New()
 	in.Placeholder = "search every session (accents and case ignored)…"
 	in.Prompt = "🔎 "
-	in.SetValue(initialQuery)
+	in.SetValue(o.Query)
 	in.Focus()
 	pr := textinput.New()
 	pr.Prompt = "project: "
 	pr.Placeholder = "name (created if new)"
-	m := &Model{ctx: ctx, st: st, project: project, search: in, prompt: pr, view: viewport.New(80, 20)}
+	m := &Model{ctx: ctx, st: st, project: o.Project, remote: o.Remote, search: in, prompt: pr,
+		view: viewport.New(80, 20), agents: availableAgents(ctx, st)}
 	m.refresh()
 	return m
 }
 
+func availableAgents(ctx context.Context, st *store.Store) []string {
+	out := []string{""}
+	counts, err := st.Count(ctx)
+	for _, a := range allAgents {
+		if err != nil || counts[a] > 0 {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // Run starts the program and returns the user's choice.
-func Run(ctx context.Context, st *store.Store, initialQuery, project string) (Result, error) {
-	m := New(ctx, st, initialQuery, project)
+func Run(ctx context.Context, st *store.Store, o Options) (Result, error) {
+	m := New(ctx, st, o)
 	final, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx)).Run()
 	if err != nil {
 		return Result{}, err
@@ -102,25 +139,50 @@ func Run(ctx context.Context, st *store.Store, initialQuery, project string) (Re
 func (m *Model) Init() tea.Cmd { return textinput.Blink }
 
 func (m *Model) filter() store.Filter {
-	return store.Filter{Agent: agents[m.agent], Project: m.project, Limit: 200, IncludeSubs: m.project != ""}
+	return store.Filter{Agent: m.agents[m.agent], Project: m.project, Limit: 100, IncludeSubs: m.project != ""}
 }
 
-func (m *Model) refresh() {
-	q := strings.TrimSpace(m.search.Value())
-	var err error
-	if q == "" {
-		m.hits, err = m.st.List(m.ctx, m.filter())
-	} else {
-		m.hits, err = m.st.Search(m.ctx, q, m.filter())
+func (m *Model) query(q string, f store.Filter) ([]store.Hit, error) {
+	if strings.TrimSpace(q) == "" {
+		return m.st.List(m.ctx, f)
 	}
-	m.err = err
+	return m.st.Search(m.ctx, q, f)
+}
+
+// refresh queries synchronously (startup, after saving to a project).
+func (m *Model) refresh() {
+	m.seq++
+	m.apply(m.query(m.search.Value(), m.filter()))
+}
+
+func (m *Model) apply(hits []store.Hit, err error) {
+	m.hits, m.err, m.loading = hits, err, false
 	if m.cursor >= len(m.hits) {
 		m.cursor = max(len(m.hits)-1, 0)
 	}
 	m.clampOffset()
 }
 
-func (m *Model) listHeight() int { return max(m.height-6, 3) }
+// scheduleSearch waits for typing to pause, then searches off the UI goroutine.
+func (m *Model) scheduleSearch(wait time.Duration) tea.Cmd {
+	m.seq++
+	m.loading = true
+	seq := m.seq
+	if wait == 0 {
+		return m.searchNow(seq)
+	}
+	return tea.Tick(wait, func(time.Time) tea.Msg { return debounceMsg{seq: seq} })
+}
+
+func (m *Model) searchNow(seq int) tea.Cmd {
+	q, f := m.search.Value(), m.filter()
+	return func() tea.Msg {
+		hits, err := m.query(q, f)
+		return resultsMsg{seq: seq, hits: hits, err: err}
+	}
+}
+
+func (m *Model) listHeight() int { return max(m.height-7, 3) }
 
 func (m *Model) clampOffset() {
 	h := m.listHeight() / 2 // two lines per row
@@ -151,6 +213,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.clampOffset()
 		return m, nil
+	case debounceMsg:
+		if msg.seq != m.seq {
+			return m, nil // the user kept typing
+		}
+		return m, m.searchNow(msg.seq)
+	case resultsMsg:
+		if msg.seq == m.seq {
+			m.apply(msg.hits, msg.err)
+		}
+		return m, nil
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
@@ -171,8 +243,8 @@ func (m *Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		if m.search.Value() != "" {
 			m.search.SetValue("")
-			m.refresh()
-			return m, nil
+			m.cursor, m.offset = 0, 0
+			return m, m.scheduleSearch(0)
 		}
 		return m, tea.Quit
 	case "up", "ctrl+k":
@@ -183,12 +255,17 @@ func (m *Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor = max(m.cursor-m.listHeight()/2, 0)
 	case "pgdown":
 		m.cursor = min(m.cursor+m.listHeight()/2, max(len(m.hits)-1, 0))
-	case "tab":
-		m.agent = (m.agent + 1) % len(agents)
-		m.refresh()
-	case "shift+tab":
-		m.agent = (m.agent + len(agents) - 1) % len(agents)
-		m.refresh()
+	case "tab", "shift+tab":
+		if len(m.agents) <= 2 {
+			return m, nil // only one agent has sessions: nothing to cycle
+		}
+		step := 1
+		if msg.String() == "shift+tab" {
+			step = len(m.agents) - 1
+		}
+		m.agent = (m.agent + step) % len(m.agents)
+		m.cursor, m.offset = 0, 0
+		return m, m.scheduleSearch(0)
 	case "enter":
 		if h := m.selected(); h != nil {
 			m.openDetail(*h)
@@ -205,7 +282,7 @@ func (m *Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.search, cmd = m.search.Update(msg)
 		if m.search.Value() != before {
 			m.cursor, m.offset = 0, 0
-			m.refresh()
+			return m, tea.Batch(cmd, m.scheduleSearch(debounce))
 		}
 		return m, cmd
 	}
@@ -352,8 +429,11 @@ func (m *Model) View() string {
 	var sb strings.Builder
 	header := titleSt.Render("agyh")
 	scope := "all agents"
-	if agents[m.agent] != "" {
-		scope = agents[m.agent]
+	if m.agents[m.agent] != "" {
+		scope = m.agents[m.agent]
+	}
+	if m.loading {
+		scope += " · searching…"
 	}
 	if m.project != "" {
 		scope += " · project " + m.project
@@ -374,11 +454,25 @@ func (m *Model) View() string {
 	for i := m.offset; i < len(m.hits) && i < m.offset+rows; i++ {
 		sb.WriteString(m.renderRow(i) + "\n")
 	}
-	sb.WriteString("\n" + mutedSt.Render("type to search · ↑/↓ · enter open · ctrl+o resume · ctrl+p project · tab agent · ctrl+y copy · esc quit"))
+	keys := "type to search · ↑/↓ · enter open · ctrl+o resume · ctrl+p project"
+	if len(m.agents) > 2 {
+		keys += " · tab agent"
+	}
+	sb.WriteString("\n" + mutedSt.Render(keys+" · ctrl+y copy · esc quit"))
 	if m.status != "" {
 		sb.WriteString("  " + statusSt.Render(m.status))
 	}
+	sb.WriteString("\n" + m.remoteLine())
 	return sb.String()
+}
+
+// remoteLine tells the user whether approvals reach their phone, and how to fix it.
+func (m *Model) remoteLine() string {
+	if m.remote == "" {
+		return mutedSt.Render("📱 phone not connected · run ") + selSt.Render("agyh connect telegram") +
+			mutedSt.Render(" or ") + selSt.Render("agyh connect whatsapp") + mutedSt.Render(", then ") + selSt.Render("agyh bridge")
+	}
+	return mutedSt.Render("📱 " + m.remote)
 }
 
 func (m *Model) renderRow(i int) string {

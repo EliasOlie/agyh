@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
+	"github.com/EliasOlie/agyh/internal/bridge"
+	"github.com/EliasOlie/agyh/internal/config"
 	"github.com/EliasOlie/agyh/internal/index"
 	"github.com/EliasOlie/agyh/internal/source"
 	"github.com/EliasOlie/agyh/internal/store"
@@ -63,7 +66,7 @@ Run without arguments for the interactive browser.`,
 			if err != nil {
 				return err
 			}
-			res, err := tui.Run(cmd.Context(), st, joinArgs(args), project)
+			res, err := tui.Run(cmd.Context(), st, tui.Options{Query: joinArgs(args), Project: project, Remote: remoteStatus(cmd.Context())})
 			st.Close()
 			if err != nil {
 				return err
@@ -84,6 +87,30 @@ Run without arguments for the interactive browser.`,
 }
 
 func (a *app) open() (*store.Store, error) { return store.Open(a.dbPath) }
+
+// remoteStatus summarizes chat channels for the TUI footer ("" = none configured).
+func remoteStatus(ctx context.Context) string {
+	cfg, err := config.Load()
+	if err != nil {
+		return ""
+	}
+	var parts []string
+	if cfg.Telegram.Token != "" && cfg.Telegram.ChatID != 0 {
+		parts = append(parts, "telegram ✓")
+	}
+	if cfg.WhatsApp.Enabled {
+		parts = append(parts, "whatsapp ✓")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	if cfg.Bridge.Secret != "" && bridge.NewClient(cfg).Available(ctx) {
+		parts = append(parts, "bridge running")
+	} else {
+		parts = append(parts, "bridge stopped: run agyh bridge")
+	}
+	return strings.Join(parts, " · ")
+}
 
 // openSynced opens the index and brings it up to date (fast: only changed files are parsed).
 func (a *app) openSynced(ctx context.Context, full bool) (*store.Store, error) {

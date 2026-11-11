@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/EliasOlie/agyh/internal/model"
 
@@ -53,7 +54,8 @@ CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS sessions_path ON sessions(path);
 CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 	agent UNINDEXED, id UNINDEXED, title, workspace, body,
-	tokenize = 'unicode61 remove_diacritics 2'
+	tokenize = 'unicode61 remove_diacritics 2',
+	prefix = '2 3 4'
 );
 CREATE TABLE IF NOT EXISTS projects (
 	name        TEXT PRIMARY KEY,
@@ -97,6 +99,10 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // SQLite: one writer; also keeps pragmas on a single connection
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate index: %w", err)
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
@@ -105,6 +111,31 @@ func Open(path string) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// schemaVersion bumps when the derived index must be rebuilt. Projects are
+// user data and always survive; sessions and FTS are re-read from the agents.
+const schemaVersion = 2
+
+func migrate(db *sql.DB) error {
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v >= schemaVersion {
+		return nil
+	}
+	// v1 → v2: FTS gained a prefix index. Drop the derived tables; the next sync refills them.
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS sessions_fts`,
+		`DROP TABLE IF EXISTS sessions`,
+		fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion),
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // Mtimes returns path → indexed modification time for one agent.
 func (s *Store) Mtimes(ctx context.Context, agent string) (map[string]int64, error) {
@@ -323,6 +354,9 @@ func recencyArgs(now time.Time) []any {
 
 // FTSQuery turns free text into a safe FTS5 expression: each word becomes a
 // quoted prefix term, so user input can never inject FTS operators.
+// One-character words are dropped: as prefixes they match almost every
+// document (and in Portuguese "a"/"e"/"o" are words), which made a single
+// keystroke cost seconds.
 func FTSQuery(text string) string {
 	words := strings.FieldsFunc(text, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '-' && r != '.'
@@ -330,7 +364,7 @@ func FTSQuery(text string) string {
 	var terms []string
 	for _, w := range words {
 		w = strings.Trim(w, "-.")
-		if w == "" {
+		if utf8.RuneCountInString(w) < 2 {
 			continue
 		}
 		terms = append(terms, `"`+strings.ReplaceAll(w, `"`, `""`)+`"*`)

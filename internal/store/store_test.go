@@ -89,6 +89,13 @@ func TestSearchInputCannotInjectFTSSyntax(t *testing.T) {
 	if got := FTSQuery(`foo "bar" baz*`); got != `"foo"* "bar"* "baz"*` {
 		t.Fatalf("FTSQuery = %s", got)
 	}
+	if got := FTSQuery("a pix e o"); got != `"pix"*` {
+		t.Fatalf("one-letter words must be dropped, got %s", got)
+	}
+	// A query made only of one-letter words lists instead of scanning every document.
+	if hits, err := st.Search(context.Background(), "a", Filter{}); err != nil || len(hits) != 3 {
+		t.Fatalf("single letter: %d hits, %v", len(hits), err)
+	}
 }
 
 func TestListOrderAndUpsertReplacesBody(t *testing.T) {
