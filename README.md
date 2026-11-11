@@ -44,15 +44,43 @@ Agent CLIs keep history per tool and per folder. After a few weeks you have hund
 
 ## Install
 
+Requires Go 1.26+ (older Go downloads the right toolchain automatically).
+
 ```bash
 go install github.com/EliasOlie/agyh/cmd/agyh@latest
+agyh --version
 ```
 
-or build from source:
+### `agyh: command not found`?
+
+`go install` puts the binary in Go's bin directory: `$(go env GOBIN)`, or `$(go env GOPATH)/bin` (usually `~/go/bin`). Many setups don't have that directory on `PATH`. Pick one fix:
+
+**A. Add Go's bin directory to your PATH** (once; works for every `go install`):
+
+```bash
+# bash
+echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.bashrc && source ~/.bashrc
+# zsh
+echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.zshrc && source ~/.zshrc
+# fish
+fish_add_path (go env GOPATH)/bin
+```
+
+On Windows (PowerShell): `[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$(go env GOPATH)\bin", "User")`, then open a new terminal.
+
+**B. Or install straight into a directory that is already on your PATH:**
+
+```bash
+GOBIN="$HOME/.local/bin" go install github.com/EliasOlie/agyh/cmd/agyh@latest
+```
+
+If the shell still says *not found* right after installing, run `hash -r` (bash) or `rehash` (zsh), or open a new terminal.
+
+### From source
 
 ```bash
 git clone https://github.com/EliasOlie/agyh && cd agyh
-go build -o ~/.local/bin/agyh ./cmd/agyh
+go build -o agyh ./cmd/agyh   # then move it anywhere on your PATH
 ```
 
 Pure Go (SQLite via `modernc.org/sqlite`), so `CGO_ENABLED=0` cross-compiles to Linux, macOS and Windows.
