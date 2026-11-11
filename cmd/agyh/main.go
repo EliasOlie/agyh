@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -19,6 +20,15 @@ import (
 )
 
 var version = "dev"
+
+func init() {
+	// `go install …@version` records the module version; use it when no -ldflags version was set.
+	if version == "dev" {
+		if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			version = bi.Main.Version
+		}
+	}
+}
 
 type app struct {
 	dbPath string
