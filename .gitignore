@@ -1,0 +1,6 @@
+/agyh
+/dist/
+*.db
+*.db-wal
+*.db-shm
+.env
