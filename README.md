@@ -36,7 +36,7 @@ Agent CLIs keep history per tool and per folder. After a few weeks you have hund
 | **Projects** | Save sessions from any agent into named projects, with notes. Filter the browser, the CLI and the chat by project. |
 | **Resume anywhere** | `agyh resume <id>` reopens the session in its agent **and** its original workspace. |
 | **Interactive TUI** | Live search as you type, read whole transcripts, resume, save to project, copy the id (OSC 52). |
-| **Encrypted Cloud Vault** | Synchronize sessions & projects across multiple machines via S3-compatible storage (VPSQL S3, MinIO, R2, AWS). Zero-knowledge client-side encryption (AES-256-GCM + PBKDF2). Instant disaster recovery (`agyh sync restore`). |
+| **Encrypted Cloud Vault** | Synchronize sessions & projects across multiple machines via S3-compatible storage (Cloudflare R2, MinIO, AWS S3, any self-hosted S3). Zero-knowledge client-side encryption (AES-256-GCM + PBKDF2). Instant disaster recovery (`agyh sync restore`). |
 | **Remote approvals** | Agent hooks send risky commands to Telegram (inline buttons) and/or WhatsApp; the first answer wins, phone or terminal. |
 | **Autonomous mode** | One tap allows the rest of a session, while fatal commands stay blocked. |
 | **Drive agents from chat** | `/chats`, `/search`, `/show`, `/save`, `/projects`, `/new` (start a headless session in a whitelisted workspace). |
@@ -206,8 +206,8 @@ Add your own patterns in the config: `"policy": {"safe": ["^make\\s+test(\\s|$)"
 
 Agent history is normally trapped on a single machine and lost whenever you format, switch laptops or work on a remote server. `agyh` includes a client-side encrypted cloud sync engine that turns your history into a persistent, multi-machine AI memory bank:
 
-- **Zero-knowledge encryption**: Every session transcript and project association is compressed with `gzip` and encrypted client-side with **AES-256-GCM** using a key derived via **PBKDF2** (100,000 rounds of SHA-256). Even if the S3 bucket is public, your conversations remain unreadable without your master passphrase.
-- **Self-hosted & S3-compatible**: Works natively with **VPSQL S3**, Cloudflare R2, MinIO, or AWS S3. No SDK dependencies; pure Go implementation over AWS SigV4.
+- **Zero-knowledge encryption**: Every session transcript and project association is compressed with `gzip` and encrypted client-side with **AES-256-GCM** using a key derived via **PBKDF2** (100,000 rounds of SHA-256). The storage provider only ever sees ciphertext. Because anyone who obtains the bucket contents can attempt offline guesses, **use a long, random passphrase** (e.g. a 6+ word diceware phrase or a password-manager-generated secret) and keep it out of your shell history.
+- **Self-hosted & S3-compatible**: Works with Cloudflare R2, MinIO, AWS S3 or any other S3-compatible store. No SDK dependencies; pure Go implementation over AWS SigV4.
 - **Local-first with Archive fallback**: Full-text search and transcript browsing stay local (0 ms latency via SQLite FTS5). If you open a session synced from another machine where local agent files don't exist, `agyh` transparently loads the transcript from its local encrypted archive cache.
 
 ```bash
@@ -252,11 +252,11 @@ agyh can approve shell commands, so it is built to fail closed:
   "policy": { "safe": [], "fatal": [] },
   "sync": {
     "enabled": true,
-    "endpoint": "https://api-vpsql.eliasolie.com.br/s3",
+    "endpoint": "https://s3.example.com",
     "bucket": "agyh-vault",
     "region": "us-east-1",
-    "access_key": "vpsql_ak_...",
-    "secret_key": "vpsql_sk_...",
+    "access_key": "AKIA...",
+    "secret_key": "...",
     "passphrase": "your-master-encryption-key",
     "prefix": "vault"
   }
@@ -270,7 +270,7 @@ agyh can approve shell commands, so it is built to fail closed:
 | `AGYH_AGY_DIR` | `~/.gemini/antigravity-cli` |
 | `AGYH_CLAUDE_DIR` | `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects` |
 | `AGYH_CODEX_DIR` | `$CODEX_HOME/sessions` or `~/.codex/sessions` |
-| `AGYH_SYNC_ENDPOINT` | Custom S3 endpoint URL (e.g. `https://api-vpsql.../s3`) |
+| `AGYH_SYNC_ENDPOINT` | Custom S3 endpoint URL (e.g. `https://<account>.r2.cloudflarestorage.com`) |
 | `AGYH_SYNC_BUCKET` | S3 bucket name |
 | `AGYH_SYNC_PASSPHRASE` | Passphrase for client-side AES-256-GCM zero-knowledge encryption |
 
