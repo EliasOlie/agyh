@@ -24,18 +24,27 @@ type Command struct {
 }
 
 var Commands = []Command{
-	{"chats", "[n]", "recent sessions from every agent"},
-	{"search", "<words>", "full-text search across all sessions"},
-	{"show", "<id>", "details and last messages of a session"},
-	{"projects", "", "list your projects"},
+	{"chats", "[n]", "recent sessions / sessões recentes"},
+	{"sessoes", "[n]", "sessões recentes de todos os agentes"},
+	{"search", "<words>", "full-text search / busca em todo o histórico"},
+	{"buscar", "<termos>", "busca textual em todas as sessões"},
+	{"show", "<id>", "details and messages / detalhes e mensagens"},
+	{"ver", "<id>", "ver conversa e detalhes de uma sessão"},
+	{"projects", "", "list projects / listar projetos"},
+	{"projetos", "", "listar todos os seus projetos"},
 	{"project", "<name>", "sessions saved in a project"},
-	{"save", "<id> <project> [note]", "save a session into a project"},
-	{"new", "[agent] [@workspace] <prompt>", "start a headless session"},
+	{"projeto", "<nome>", "ver sessões de um projeto"},
+	{"save", "<id> <project> [note]", "save session into a project"},
+	{"salvar", "<id> <projeto> [nota]", "salvar sessão em um projeto"},
+	{"new", "[agent] [@workspace] <prompt>", "start headless agent task"},
+	{"novo", "[agent] [@workspace] <prompt>", "iniciar tarefa de agente em background"},
 	{"ws", "", "workspaces available to /new"},
 	{"pending", "", "approvals waiting for you"},
+	{"pendentes", "", "aprovações aguardando resposta"},
 	{"auto", "[off <id>]", "sessions in autonomous mode"},
-	{"sync", "", "sync sessions with cloud vault"},
-	{"help", "", "this message"},
+	{"sync", "", "sync sessions with encrypted cloud vault"},
+	{"ajuda", "", "onboarding e guia completo de comandos"},
+	{"help", "", "command guide and onboarding"},
 }
 
 // HandleText processes one inbound chat message and replies on the same channel.
@@ -66,45 +75,47 @@ func (b *Bridge) Execute(ctx context.Context, m Markup, origin, text string) str
 	rest = strings.TrimSpace(rest)
 
 	switch strings.ToLower(name) {
-	case "start", "help":
+	case "start":
+		return b.onboarding(m)
+	case "help", "ajuda":
 		return b.help(m)
-	case "chats", "history":
+	case "chats", "history", "sessoes", "sessões", "historico", "histórico":
 		n := 8
 		if v, err := strconv.Atoi(rest); err == nil && v > 0 && v <= 30 {
 			n = v
 		}
 		hits, err := b.store.List(ctx, store.Filter{Limit: n})
-		return b.listReply(m, "Recent sessions", hits, err)
-	case "search":
+		return b.listReply(m, "Recent sessions / Sessões recentes", hits, err)
+	case "search", "buscar", "pesquisar", "busca":
 		if rest == "" {
-			return "Usage: /search <words>"
+			return "Usage / Uso: /search <words> ou /buscar <termos>"
 		}
 		hits, err := b.store.Search(ctx, rest, store.Filter{Limit: 8})
-		return b.listReply(m, "Results for "+m.Bold(m.Escape(rest)), hits, err)
-	case "show":
+		return b.listReply(m, "Results for / Resultados para "+m.Bold(m.Escape(rest)), hits, err)
+	case "show", "ver", "exibir":
 		return b.show(ctx, m, rest)
-	case "projects":
+	case "projects", "projetos":
 		return b.projects(ctx, m)
-	case "project":
+	case "project", "projeto":
 		if rest == "" {
-			return "Usage: /project <name>"
+			return "Usage / Uso: /project <name> ou /projeto <nome>"
 		}
 		hits, err := b.store.List(ctx, store.Filter{Project: rest, Limit: 20, IncludeSubs: true})
-		return b.listReply(m, "Project "+m.Bold(m.Escape(rest)), hits, err)
-	case "save":
+		return b.listReply(m, "Project / Projeto "+m.Bold(m.Escape(rest)), hits, err)
+	case "save", "salvar":
 		return b.save(ctx, m, rest)
-	case "new":
+	case "new", "novo", "run", "iniciar":
 		return b.newSession(ctx, m, rest)
-	case "ws", "cd":
+	case "ws", "cd", "workspaces":
 		return b.workspaces(m)
-	case "pending":
+	case "pending", "pendentes", "fila":
 		return b.pending(m)
-	case "auto":
+	case "auto", "autonomo", "autônomo":
 		return b.auto(ctx, m, rest)
-	case "sync":
+	case "sync", "sincronizar":
 		return b.syncVault(ctx, m)
 	}
-	return "Unknown command /" + m.Escape(name) + ". Send /help."
+	return "Unknown command /" + m.Escape(name) + ". Send /help or /ajuda."
 }
 
 func (b *Bridge) syncVault(ctx context.Context, m Markup) string {
@@ -123,9 +134,32 @@ func (b *Bridge) syncVault(ctx context.Context, m Markup) string {
 		res.Uploaded, res.Downloaded, res.Total)
 }
 
+func (b *Bridge) onboarding(m Markup) string {
+	var sb strings.Builder
+	sb.WriteString("👋 " + m.Bold("Bem-vindo ao agyh! / Welcome to agyh!") + "\n\n")
+	sb.WriteString("O " + m.Bold("agyh") + " conecta seus coding agents (Antigravity, Claude Code, Codex) diretamente ao seu mensageiro, com histórico unificado e controle de permissões remoto.\n\n")
+	sb.WriteString(m.Bold("🔐 Como responder aprovações / How to approve:") + "\n")
+	sb.WriteString("Quando um agente precisar rodar um comando (ex: git push, migrations):\n")
+	sb.WriteString("• No Telegram: toque diretamente nos botões.\n")
+	sb.WriteString("• No WhatsApp ou por texto, responda:\n")
+	sb.WriteString("  - " + m.Code("s") + ", " + m.Code("sim") + " ou " + m.Code("y") + " ➔ Permitir / Allow\n")
+	sb.WriteString("  - " + m.Code("n") + ", " + m.Code("nao") + " ou " + m.Code("rejeitar") + " ➔ Negar / Deny\n")
+	sb.WriteString("  - " + m.Code("a") + ", " + m.Code("auto") + " ou " + m.Code("sempre") + " ➔ Sessão Autônoma ⚡\n\n")
+	sb.WriteString(m.Bold("📱 Comandos Principais / Main Commands:") + "\n")
+	sb.WriteString("• " + m.Code("/sessoes") + " ou " + m.Code("/chats") + " — Ver histórico recente\n")
+	sb.WriteString("• " + m.Code("/buscar <termo>") + " ou " + m.Code("/search <words>") + " — Busca textual instantânea\n")
+	sb.WriteString("• " + m.Code("/ver <id>") + " ou " + m.Code("/show <id>") + " — Detalhes e mensagens da conversa\n")
+	sb.WriteString("• " + m.Code("/novo [agent] <prompt>") + " ou " + m.Code("/new ...") + " — Iniciar tarefa em background\n")
+	sb.WriteString("• " + m.Code("/projetos") + " ou " + m.Code("/projects") + " — Listar seus projetos organizados\n")
+	sb.WriteString("• " + m.Code("/sync") + " — Sincronizar com o Cloud Vault criptografado\n")
+	sb.WriteString("• " + m.Code("/ajuda") + " ou " + m.Code("/help") + " — Ver todos os comandos\n\n")
+	sb.WriteString("💡 Dica: Envie " + m.Code("/sessoes") + " agora para ver suas sessões recentes!")
+	return sb.String()
+}
+
 func (b *Bridge) help(m Markup) string {
 	var sb strings.Builder
-	sb.WriteString(m.Bold("agyh") + " — your coding-agent sessions, from anywhere.\n\n")
+	sb.WriteString(m.Bold("agyh") + " — your coding-agent sessions, from anywhere / suas sessões de IA em qualquer lugar.\n\n")
 	for _, c := range Commands {
 		line := "/" + c.Name
 		if c.Args != "" {
@@ -133,8 +167,8 @@ func (b *Bridge) help(m Markup) string {
 		}
 		fmt.Fprintf(&sb, "%s — %s\n", m.Escape(line), m.Escape(c.Help))
 	}
-	sb.WriteString("\nApprovals: tap the buttons, or reply " + m.Code("y <id>") + ", " + m.Code("n <id>") +
-		" or " + m.Code("a <id>") + " (allow the whole session).")
+	sb.WriteString("\n" + m.Bold("Aprovações / Approvals:") + " Toque nos botões ou responda " + m.Code("s <id>") + " (sim/allow), " +
+		m.Code("n <id>") + " (não/deny) ou " + m.Code("a <id>") + " (autônomo/always).")
 	return sb.String()
 }
 
@@ -342,11 +376,11 @@ func (b *Bridge) textApproval(ctx context.Context, origin, text string) (string,
 	var v policy.Verdict
 	auto := false
 	switch f[0] {
-	case "y", "yes", "s", "sim", "ok":
+	case "y", "yes", "s", "sim", "ok", "permitir", "aprovar", "liberar", "allow":
 		v = policy.Allow
-	case "n", "no", "não", "nao":
+	case "n", "no", "não", "nao", "negar", "rejeitar", "bloquear", "deny":
 		v = policy.Deny
-	case "a", "always", "sempre":
+	case "a", "always", "sempre", "all", "todos", "auto", "autonomo", "autônomo":
 		v, auto = policy.Allow, true
 	default:
 		return "", false

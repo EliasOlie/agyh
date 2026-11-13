@@ -86,7 +86,7 @@ func PairWhatsApp(ctx context.Context, dbPath string, out io.Writer) (string, er
 			}
 			self := client.Store.ID.ToNonAD()
 			_, _ = client.SendMessage(ctx, self, &waE2E.Message{Conversation: proto.String(
-				"🤖 agyh connected. Send /help here (in this chat with yourself).")})
+				"🤖 agyh conectado com sucesso! / Connected successfully!\n\nEnvie /start ou /ajuda aqui para ver os comandos e como aprovar ações do agente pelo celular.")})
 			return self.String(), nil
 		case "timeout":
 			return "", errors.New("QR code expired: run the command again")
@@ -177,8 +177,11 @@ func (w *WhatsApp) Send(ctx context.Context, text string) error {
 
 func (w *WhatsApp) PromptApproval(ctx context.Context, a *Approval) error {
 	m := w.Markup()
-	return w.Send(ctx, approvalText(m, a)+fmt.Sprintf("\n\nReply %s allow · %s deny · %s allow whole session",
-		m.Code("y "+a.ID), m.Code("n "+a.ID), m.Code("a "+a.ID)))
+	return w.Send(ctx, approvalText(m, a)+fmt.Sprintf(
+		"\n\nResponda / Reply:\n• %s ou %s: aprovar / allow\n• %s ou %s: rejeitar / deny\n• %s ou %s: liberar sessão inteira / whole session ⚡",
+		m.Code("s "+a.ID), m.Code("y "+a.ID),
+		m.Code("n "+a.ID), m.Code("nao "+a.ID),
+		m.Code("a "+a.ID), m.Code("auto "+a.ID)))
 }
 
 func (w *WhatsApp) ApprovalResolved(ctx context.Context, a *Approval, d Decision) error {

@@ -34,9 +34,9 @@ type Policy struct {
 
 type Sync struct {
 	Enabled    bool   `json:"enabled"`
-	Endpoint   string `json:"endpoint,omitempty"`   // S3 endpoint URL (e.g. https://api-vpsql.../s3)
+	Endpoint   string `json:"endpoint,omitempty"` // S3 endpoint URL (e.g. https://api-vpsql.../s3)
 	Bucket     string `json:"bucket,omitempty"`
-	Region     string `json:"region,omitempty"`     // default: us-east-1
+	Region     string `json:"region,omitempty"` // default: us-east-1
 	AccessKey  string `json:"access_key,omitempty"`
 	SecretKey  string `json:"secret_key,omitempty"`
 	Passphrase string `json:"passphrase,omitempty"` // for client-side zero-knowledge AES-256-GCM

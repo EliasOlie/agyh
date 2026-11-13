@@ -251,10 +251,10 @@ func approvalText(m Markup, a *Approval) string {
 
 func (t *Telegram) PromptApproval(ctx context.Context, a *Approval) error {
 	kb := map[string]any{"inline_keyboard": [][]map[string]string{{
-		{"text": "✅ Allow", "callback_data": "ap:" + a.ID + ":allow"},
-		{"text": "❌ Deny", "callback_data": "ap:" + a.ID + ":deny"},
+		{"text": "✅ Permitir · Allow", "callback_data": "ap:" + a.ID + ":allow"},
+		{"text": "❌ Negar · Deny", "callback_data": "ap:" + a.ID + ":deny"},
 	}, {
-		{"text": "⚡ Allow whole session", "callback_data": "ap:" + a.ID + ":auto"},
+		{"text": "⚡ Permitir sessão · Whole session", "callback_data": "ap:" + a.ID + ":auto"},
 	}}}
 	var msg tgMessage
 	err := t.client.Call(ctx, "sendMessage", map[string]any{
@@ -281,14 +281,14 @@ func outcome(d Decision) string {
 	switch d.Verdict {
 	case policy.Allow:
 		if d.By == "auto" {
-			return "⚡ Allowed (autonomous)"
+			return "⚡ Allowed / Permitido (autônomo)"
 		}
-		return "✅ Allowed via " + d.By
+		return "✅ Allowed / Permitido via " + d.By
 	case policy.Deny:
-		return "❌ Denied via " + d.By
+		return "❌ Denied / Negado via " + d.By
 	}
 	if d.By == "timeout" {
-		return "⏱ No answer: back to the terminal prompt"
+		return "⏱️ No answer / Sem resposta: fallback to terminal"
 	}
 	return "↩️ " + d.Reason
 }

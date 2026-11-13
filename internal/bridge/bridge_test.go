@@ -245,8 +245,20 @@ func TestCommands(t *testing.T) {
 	if out := b.Execute(ctx, m, "test", "/chats"); !strings.Contains(out, "Fila idempotente") {
 		t.Fatalf("/chats: %s", out)
 	}
+	if out := b.Execute(ctx, m, "test", "/sessoes"); !strings.Contains(out, "Fila idempotente") {
+		t.Fatalf("/sessoes: %s", out)
+	}
 	if out := b.Execute(ctx, m, "test", "/search whatsapp"); !strings.Contains(out, "aaaa1111") {
 		t.Fatalf("/search: %s", out)
+	}
+	if out := b.Execute(ctx, m, "test", "/buscar whatsapp"); !strings.Contains(out, "aaaa1111") {
+		t.Fatalf("/buscar: %s", out)
+	}
+	if out := b.Execute(ctx, m, "test", "/start"); !strings.Contains(out, "Bem-vindo ao agyh") {
+		t.Fatalf("/start: %s", out)
+	}
+	if out := b.Execute(ctx, m, "test", "/ajuda"); !strings.Contains(out, "Aprovações") {
+		t.Fatalf("/ajuda: %s", out)
 	}
 	if out := b.Execute(ctx, m, "test", "/save aaaa1111 pagamentos fila base"); !strings.Contains(out, "Saved") {
 		t.Fatalf("/save: %s", out)

@@ -30,12 +30,12 @@ func (s SessionSummary) Key() string {
 
 // Manifest is the index of all sessions and projects stored in the cloud vault.
 type Manifest struct {
-	Version         int                           `json:"version"`
-	UpdatedAt       time.Time                     `json:"updated_at"`
-	Sessions        map[string]SessionSummary     `json:"sessions"`
-	Projects        []store.Project               `json:"projects,omitempty"`
-	ProjectSessions map[string][]string           `json:"project_sessions,omitempty"` // agent:id -> [projects]
-	Notes           map[string]map[string]string  `json:"notes,omitempty"`            // agent:id -> (project -> note)
+	Version         int                          `json:"version"`
+	UpdatedAt       time.Time                    `json:"updated_at"`
+	Sessions        map[string]SessionSummary    `json:"sessions"`
+	Projects        []store.Project              `json:"projects,omitempty"`
+	ProjectSessions map[string][]string          `json:"project_sessions,omitempty"` // agent:id -> [projects]
+	Notes           map[string]map[string]string `json:"notes,omitempty"`            // agent:id -> (project -> note)
 }
 
 func NewManifest() *Manifest {

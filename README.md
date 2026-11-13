@@ -183,20 +183,24 @@ agyh bridge     # or as a systemd --user service, see below
 
 Add your own patterns in the config: `"policy": {"safe": ["^make\\s+test(\\s|$)"], "fatal": ["\\bterraform\\s+destroy\\b"]}`.
 
-### Chat commands
+### Chat commands (Bilingual / PT-BR & EN)
 
-| | |
+| Command / Comando | What it does / O que faz |
 |---|---|
-| `/chats [n]` | Recent sessions from every agent |
-| `/search <words>` | Full-text search |
-| `/show <id>` | Details, last message and the resume command |
-| `/save <id> <project> [note]` | Save a session into a project |
-| `/projects`, `/project <name>` | Browse projects |
-| `/new [agent] [@workspace] <prompt>` | Start a headless session (e.g. `claude -p`) and get the result back |
+| `/chats [n]` · `/sessoes` | Recent sessions from every agent / Sessões recentes |
+| `/search <words>` · `/buscar` | Full-text search / Busca em todo o histórico |
+| `/show <id>` · `/ver` | Details and messages / Detalhes e mensagens da conversa |
+| `/save <id> <project> [note]` · `/salvar` | Save a session into a project / Salvar sessão no projeto |
+| `/projects` · `/projetos` | Browse projects / Listar projetos |
+| `/new [agent] [@workspace] <prompt>` · `/novo` | Start a headless session / Iniciar tarefa em background |
 | `/ws` | Workspaces `/new` may use |
-| `/pending`, `/auto [off <id>]` | Pending approvals, autonomous sessions |
-| `/sync` | Synchronize sessions and projects with cloud vault |
-| `y <id>` · `n <id>` · `a <id>` | Answer an approval by text (the id is optional when only one is pending) |
+| `/pending` · `/pendentes` | Pending approvals / Aprovações pendentes |
+| `/auto [off <id>]` | Autonomous sessions / Sessões em modo autônomo |
+| `/sync` · `/sincronizar` | Synchronize with cloud vault / Sincronizar com vault |
+| `/start` · `/ajuda` · `/help` | Interactive onboarding & command guide |
+| `s <id>` · `y` · `sim` · `allow` | Allow / Permitir comando |
+| `n <id>` · `nao` · `rejeitar` · `deny` | Deny / Rejeitar comando |
+| `a <id>` · `auto` · `sempre` | Allow whole session (autonomous mode) ⚡ |
 
 ## Cloud Vault & Disaster Recovery
 

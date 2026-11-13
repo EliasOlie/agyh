@@ -137,7 +137,7 @@ func (a *app) connectCmd() *cobra.Command {
 				return err
 			}
 			ch := bridge.NewTelegram(client, chatID)
-			_ = ch.Send(ctx, "🤖 <b>agyh connected.</b> Only this chat can control your agents. Send /help.")
+			_ = ch.Send(ctx, "🤖 <b>agyh conectado com sucesso! / Connected successfully!</b>\n\nApenas este chat pode controlar seus agentes.\nEnvie /start ou /ajuda para ver o guia de comandos e aprovações.")
 			fmt.Fprintf(out, "✓ Paired with %s (chat %d). Saved to %s\nStart the daemon with: agyh bridge\n", displayName(from), chatID, config.Path())
 			return nil
 		},
