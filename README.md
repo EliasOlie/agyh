@@ -36,6 +36,7 @@ Agent CLIs keep history per tool and per folder. After a few weeks you have hund
 | **Projects** | Save sessions from any agent into named projects, with notes. Filter the browser, the CLI and the chat by project. |
 | **Resume anywhere** | `agyh resume <id>` reopens the session in its agent **and** its original workspace. |
 | **Interactive TUI** | Live search as you type, read whole transcripts, resume, save to project, copy the id (OSC 52). |
+| **Encrypted Cloud Vault** | Synchronize sessions & projects across multiple machines via S3-compatible storage (VPSQL S3, MinIO, R2, AWS). Zero-knowledge client-side encryption (AES-256-GCM + PBKDF2). Instant disaster recovery (`agyh sync restore`). |
 | **Remote approvals** | Agent hooks send risky commands to Telegram (inline buttons) and/or WhatsApp; the first answer wins, phone or terminal. |
 | **Autonomous mode** | One tap allows the rest of a session, while fatal commands stay blocked. |
 | **Drive agents from chat** | `/chats`, `/search`, `/show`, `/save`, `/projects`, `/new` (start a headless session in a whitelisted workspace). |
@@ -109,6 +110,7 @@ agyh -p pagamentos           # browser inside one project
 | `agyh resume [<id> \| --last]` | Exec the agent in the session's workspace. `--print` shows the command instead. |
 | `agyh index [--full]` | Sync the index (normally automatic). |
 | `agyh project new\|ls\|add\|rm\|show\|rename\|delete` | Manage projects. |
+| `agyh sync [status\|push\|pull\|restore]` | Synchronize or restore sessions with encrypted cloud vault. |
 | `agyh connect telegram\|whatsapp` | Pair a chat channel. |
 | `agyh bridge` | Run the daemon that connects hooks and chat. |
 | `agyh install-hooks claude\|agy` | Print the hook config to paste into your agent. |
@@ -193,6 +195,7 @@ Add your own patterns in the config: `"policy": {"safe": ["^make\\s+test(\\s|$)"
 | `/new [agent] [@workspace] <prompt>` | Start a headless session (e.g. `claude -p`) and get the result back |
 | `/ws` | Workspaces `/new` may use |
 | `/pending`, `/auto [off <id>]` | Pending approvals, autonomous sessions |
+| `/sync` | Synchronize sessions and projects with cloud vault |
 | `y <id>` · `n <id>` · `a <id>` | Answer an approval by text (the id is optional when only one is pending) |
 
 ## Security model
@@ -219,7 +222,17 @@ agyh can approve shell commands, so it is built to fail closed:
   "approval_timeout_sec": 120,
   "runners": { "claude": ["claude", "-p", "{prompt}"] },
   "workspaces": ["/home/you/work/api", "/home/you/work/pdv"],
-  "policy": { "safe": [], "fatal": [] }
+  "policy": { "safe": [], "fatal": [] },
+  "sync": {
+    "enabled": true,
+    "endpoint": "https://api-vpsql.eliasolie.com.br/s3",
+    "bucket": "agyh-vault",
+    "region": "us-east-1",
+    "access_key": "vpsql_ak_...",
+    "secret_key": "vpsql_sk_...",
+    "passphrase": "your-master-encryption-key",
+    "prefix": "vault"
+  }
 }
 ```
 
@@ -230,6 +243,9 @@ agyh can approve shell commands, so it is built to fail closed:
 | `AGYH_AGY_DIR` | `~/.gemini/antigravity-cli` |
 | `AGYH_CLAUDE_DIR` | `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects` |
 | `AGYH_CODEX_DIR` | `$CODEX_HOME/sessions` or `~/.codex/sessions` |
+| `AGYH_SYNC_ENDPOINT` | Custom S3 endpoint URL (e.g. `https://api-vpsql.../s3`) |
+| `AGYH_SYNC_BUCKET` | S3 bucket name |
+| `AGYH_SYNC_PASSPHRASE` | Passphrase for client-side AES-256-GCM zero-knowledge encryption |
 
 Run the bridge as a user service:
 

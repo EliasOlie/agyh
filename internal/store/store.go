@@ -237,7 +237,7 @@ func (s *Store) DeleteMissing(ctx context.Context, agent string, keep map[string
 	}
 	n := 0
 	for p := range idx {
-		if keep[p] {
+		if keep[p] || strings.HasPrefix(p, "archive:") || strings.HasPrefix(p, "synced:") || p == "" {
 			continue
 		}
 		rows, err := s.db.QueryContext(ctx, `SELECT id FROM sessions WHERE agent = ? AND path = ?`, agent, p)
@@ -484,6 +484,46 @@ func (s *Store) Count(ctx context.Context) (map[string]int, error) {
 		out[a] = n
 	}
 	return out, rows.Err()
+}
+
+// AllSessions returns every session in the store without a limit, ordered by updated_at DESC.
+func (s *Store) AllSessions(ctx context.Context) ([]model.Session, error) {
+	q := `SELECT ` + sessionCols + `, '' FROM sessions s ORDER BY s.updated_at DESC`
+	hits, err := s.query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.Session, len(hits))
+	for i, h := range hits {
+		out[i] = h.Session
+	}
+	return out, nil
+}
+
+// ProjectMap returns all project names and notes for each session, keyed by "agent:id".
+func (s *Store) ProjectMap(ctx context.Context) (map[string][]string, map[string]map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT project, agent, id, note FROM project_sessions`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	projects := map[string][]string{}
+	notes := map[string]map[string]string{}
+	for rows.Next() {
+		var p, a, id, note string
+		if err := rows.Scan(&p, &a, &id, &note); err != nil {
+			return nil, nil, err
+		}
+		key := a + ":" + id
+		projects[key] = append(projects[key], p)
+		if note != "" {
+			if notes[key] == nil {
+				notes[key] = map[string]string{}
+			}
+			notes[key][p] = note
+		}
+	}
+	return projects, notes, rows.Err()
 }
 
 func unix(t time.Time) int64 {

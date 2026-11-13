@@ -81,7 +81,7 @@ Run without arguments for the interactive browser.`,
 	root.Flags().StringVarP(&project, "project", "p", "", "open the browser inside one project")
 	root.AddCommand(
 		a.lsCmd(), a.searchCmd(), a.showCmd(), a.resumeCmd(), a.indexCmd(), a.projectCmd(),
-		a.hookCmd(), a.bridgeCmd(), a.connectCmd(), installHooksCmd(), a.doctorCmd(),
+		a.hookCmd(), a.bridgeCmd(), a.connectCmd(), installHooksCmd(), a.syncCmd(), a.doctorCmd(),
 	)
 	return root
 }
@@ -100,6 +100,9 @@ func remoteStatus(ctx context.Context) string {
 	}
 	if cfg.WhatsApp.Enabled {
 		parts = append(parts, "whatsapp ✓")
+	}
+	if cfg.Sync.Enabled {
+		parts = append(parts, "vault sync ✓")
 	}
 	if len(parts) == 0 {
 		return ""

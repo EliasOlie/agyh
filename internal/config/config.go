@@ -32,11 +32,24 @@ type Policy struct {
 	Fatal []string `json:"fatal,omitempty"`
 }
 
+type Sync struct {
+	Enabled    bool   `json:"enabled"`
+	Endpoint   string `json:"endpoint,omitempty"`   // S3 endpoint URL (e.g. https://api-vpsql.../s3)
+	Bucket     string `json:"bucket,omitempty"`
+	Region     string `json:"region,omitempty"`     // default: us-east-1
+	AccessKey  string `json:"access_key,omitempty"`
+	SecretKey  string `json:"secret_key,omitempty"`
+	Passphrase string `json:"passphrase,omitempty"` // for client-side zero-knowledge AES-256-GCM
+	Prefix     string `json:"prefix,omitempty"`     // default: "vault"
+	AutoSync   bool   `json:"auto_sync,omitempty"`  // sync automatically in bridge daemon
+}
+
 type Config struct {
 	Bridge   Bridge   `json:"bridge"`
 	Telegram Telegram `json:"telegram"`
 	WhatsApp WhatsApp `json:"whatsapp"`
 	Policy   Policy   `json:"policy"`
+	Sync     Sync     `json:"sync"`
 	// ApprovalTimeoutSec is how long a hook waits for a remote decision.
 	ApprovalTimeoutSec int `json:"approval_timeout_sec"`
 	// Runners start a new headless session from chat (/new). "{prompt}" is replaced.
@@ -95,6 +108,33 @@ func LoadFrom(path string) (*Config, error) {
 	}
 	if c.Runners == nil {
 		c.Runners = Default().Runners
+	}
+	if v := os.Getenv("AGYH_SYNC_ENDPOINT"); v != "" {
+		c.Sync.Endpoint = v
+	}
+	if v := os.Getenv("AGYH_SYNC_BUCKET"); v != "" {
+		c.Sync.Bucket = v
+	}
+	if v := os.Getenv("AGYH_SYNC_REGION"); v != "" {
+		c.Sync.Region = v
+	}
+	if v := os.Getenv("AGYH_SYNC_ACCESS_KEY"); v != "" {
+		c.Sync.AccessKey = v
+	}
+	if v := os.Getenv("AGYH_SYNC_SECRET_KEY"); v != "" {
+		c.Sync.SecretKey = v
+	}
+	if v := os.Getenv("AGYH_SYNC_PASSPHRASE"); v != "" {
+		c.Sync.Passphrase = v
+	}
+	if v := os.Getenv("AGYH_SYNC_PREFIX"); v != "" {
+		c.Sync.Prefix = v
+	}
+	if c.Sync.Region == "" {
+		c.Sync.Region = "us-east-1"
+	}
+	if c.Sync.Prefix == "" {
+		c.Sync.Prefix = "vault"
 	}
 	return c, nil
 }

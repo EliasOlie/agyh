@@ -15,6 +15,7 @@ import (
 	"github.com/EliasOlie/agyh/internal/model"
 	"github.com/EliasOlie/agyh/internal/policy"
 	"github.com/EliasOlie/agyh/internal/store"
+	vaultsync "github.com/EliasOlie/agyh/internal/sync"
 )
 
 // Command describes one chat command, used for /help and Telegram's menu.
@@ -33,6 +34,7 @@ var Commands = []Command{
 	{"ws", "", "workspaces available to /new"},
 	{"pending", "", "approvals waiting for you"},
 	{"auto", "[off <id>]", "sessions in autonomous mode"},
+	{"sync", "", "sync sessions with cloud vault"},
 	{"help", "", "this message"},
 }
 
@@ -99,8 +101,26 @@ func (b *Bridge) Execute(ctx context.Context, m Markup, origin, text string) str
 		return b.pending(m)
 	case "auto":
 		return b.auto(ctx, m, rest)
+	case "sync":
+		return b.syncVault(ctx, m)
 	}
 	return "Unknown command /" + m.Escape(name) + ". Send /help."
+}
+
+func (b *Bridge) syncVault(ctx context.Context, m Markup) string {
+	if !b.cfg.Sync.Enabled {
+		return "Cloud vault is not configured. Add \"sync\" to your config."
+	}
+	engine, err := vaultsync.NewEngine(b.cfg.Sync, b.store)
+	if err != nil {
+		return "Error: " + m.Escape(err.Error())
+	}
+	res, err := engine.Sync(ctx)
+	if err != nil {
+		return "Sync failed: " + m.Escape(err.Error())
+	}
+	return fmt.Sprintf("☁️ Synced with vault: %d uploaded, %d downloaded (%d total)",
+		res.Uploaded, res.Downloaded, res.Total)
 }
 
 func (b *Bridge) help(m Markup) string {

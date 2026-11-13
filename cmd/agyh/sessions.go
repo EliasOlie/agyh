@@ -138,8 +138,7 @@ func (a *app) showCmd() *cobra.Command {
 				return err
 			}
 			src := source.ByName(sess.Agent)
-			meta := sess
-			_, msgs, err := src.Load(cmd.Context(), source.Ref{Agent: sess.Agent, ID: sess.ID, Path: sess.Path, Meta: &meta})
+			_, msgs, err := source.LoadSessionOrArchive(cmd.Context(), sess)
 			if err != nil {
 				return err
 			}
@@ -152,10 +151,19 @@ func (a *app) showCmd() *cobra.Command {
 				enc.SetIndent("", "  ")
 				return enc.Encode(map[string]any{"session": sess, "messages": msgs})
 			}
-			dir, argv := src.Resume(sess)
-			fmt.Fprintf(w, "%s\n%s · %s · %s · %d messages\nid: %s\nresume: cd %s && %s\n\n",
+			var dir string
+			var argv []string
+			if src != nil {
+				dir, argv = src.Resume(sess)
+			}
+			fmt.Fprintf(w, "%s\n%s · %s · %s · %d messages\nid: %s",
 				sess.Title, sess.Agent, hook.ShortenHome(sess.Workspace), sess.UpdatedAt.Local().Format("2006-01-02 15:04"),
-				sess.Messages, sess.ID, hook.ShortenHome(dir), strings.Join(argv, " "))
+				sess.Messages, sess.ID)
+			if dir != "" && len(argv) > 0 {
+				fmt.Fprintf(w, "\nresume: cd %s && %s", hook.ShortenHome(dir), strings.Join(argv, " "))
+			}
+			fmt.Fprintln(w)
+			fmt.Fprintln(w)
 			for _, m := range msgs {
 				who := "› you"
 				if m.Role == "assistant" {

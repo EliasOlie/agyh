@@ -273,6 +273,7 @@ func (a *app) doctorCmd() *cobra.Command {
 			fmt.Fprintf(out, "  %s telegram\n", ok(cfg.Telegram.Token != "" && cfg.Telegram.ChatID != 0))
 			_, waErr := os.Stat(whatsappDB())
 			fmt.Fprintf(out, "  %s whatsapp\n", ok(cfg.WhatsApp.Enabled && waErr == nil))
+			fmt.Fprintf(out, "  %s cloud vault (%s)\n", ok(cfg.Sync.Enabled), cfg.Sync.Endpoint)
 			fmt.Fprintf(out, "  %s bridge running on %s\n", ok(cfg.Bridge.Secret != "" && bridge.NewClient(cfg).Available(ctx)), cfg.Bridge.Addr)
 			return nil
 		},

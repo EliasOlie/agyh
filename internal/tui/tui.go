@@ -391,12 +391,7 @@ func (m *Model) renderDetail(h store.Hit) string {
 		sb.WriteString(statusSt.Render("projects: "+strings.Join(h.Projects, ", ")) + "\n")
 	}
 	sb.WriteString("\n")
-	src := source.ByName(h.Agent)
-	if src == nil {
-		return sb.String()
-	}
-	meta := h.Session
-	_, msgs, err := src.Load(m.ctx, source.Ref{Agent: h.Agent, ID: h.ID, Path: h.Path, Meta: &meta})
+	_, msgs, err := source.LoadSessionOrArchive(m.ctx, h.Session)
 	if err != nil {
 		sb.WriteString("could not read transcript: " + err.Error())
 		return sb.String()
