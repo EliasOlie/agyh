@@ -198,6 +198,29 @@ Add your own patterns in the config: `"policy": {"safe": ["^make\\s+test(\\s|$)"
 | `/sync` | Synchronize sessions and projects with cloud vault |
 | `y <id>` · `n <id>` · `a <id>` | Answer an approval by text (the id is optional when only one is pending) |
 
+## Cloud Vault & Disaster Recovery
+
+Agent history is normally trapped on a single machine and lost whenever you format, switch laptops or work on a remote server. `agyh` includes a client-side encrypted cloud sync engine that turns your history into a persistent, multi-machine AI memory bank:
+
+- **Zero-knowledge encryption**: Every session transcript and project association is compressed with `gzip` and encrypted client-side with **AES-256-GCM** using a key derived via **PBKDF2** (100,000 rounds of SHA-256). Even if the S3 bucket is public, your conversations remain unreadable without your master passphrase.
+- **Self-hosted & S3-compatible**: Works natively with **VPSQL S3**, Cloudflare R2, MinIO, or AWS S3. No SDK dependencies; pure Go implementation over AWS SigV4.
+- **Local-first with Archive fallback**: Full-text search and transcript browsing stay local (0 ms latency via SQLite FTS5). If you open a session synced from another machine where local agent files don't exist, `agyh` transparently loads the transcript from its local encrypted archive cache.
+
+```bash
+# Check differences between local store and cloud vault
+agyh sync status
+
+# Bidirectional sync (uploads local changes, pulls remote sessions)
+agyh sync
+
+# Force upload or pull
+agyh sync push
+agyh sync pull
+
+# Fresh machine or disaster recovery? Reconstruct your entire history from zero:
+agyh sync restore
+```
+
 ## Security model
 
 agyh can approve shell commands, so it is built to fail closed:
