@@ -206,7 +206,7 @@ Add your own patterns in the config: `"policy": {"safe": ["^make\\s+test(\\s|$)"
 
 Agent history is normally trapped on a single machine and lost whenever you format, switch laptops or work on a remote server. `agyh` includes a client-side encrypted cloud sync engine that turns your history into a persistent, multi-machine AI memory bank:
 
-- **Zero-knowledge encryption**: Every session transcript and project association is compressed with `gzip` and encrypted client-side with **AES-256-GCM** using a key derived via **PBKDF2** (100,000 rounds of SHA-256). Even if the S3 bucket is public, your conversations remain unreadable without your master passphrase.
+- **Zero-knowledge encryption**: Every session transcript and project association is compressed with `gzip` and encrypted client-side with **AES-256-GCM** using a key derived via **PBKDF2** (100,000 rounds of SHA-256). The storage provider only ever sees ciphertext. Because anyone who obtains the bucket contents can attempt offline guesses, **use a long, random passphrase** (e.g. a 6+ word diceware phrase or a password-manager-generated secret) and keep it out of your shell history.
 - **Self-hosted & S3-compatible**: Works with Cloudflare R2, MinIO, AWS S3 or any other S3-compatible store. No SDK dependencies; pure Go implementation over AWS SigV4.
 - **Local-first with Archive fallback**: Full-text search and transcript browsing stay local (0 ms latency via SQLite FTS5). If you open a session synced from another machine where local agent files don't exist, `agyh` transparently loads the transcript from its local encrypted archive cache.
 
