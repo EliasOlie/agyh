@@ -112,6 +112,14 @@ func (c *TelegramClient) FirstChat(ctx context.Context) (chatID int64, from TgUs
 	for {
 		ups, err := c.GetUpdates(ctx, offset, 25)
 		if err != nil {
+			if strings.Contains(err.Error(), "Conflict") {
+				select {
+				case <-ctx.Done():
+					return 0, TgUser{}, ctx.Err()
+				case <-time.After(3 * time.Second):
+					continue
+				}
+			}
 			return 0, TgUser{}, err
 		}
 		for _, u := range ups {
