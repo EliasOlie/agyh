@@ -1,0 +1,55 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! **Security issues go to [private reporting](https://github.com/EliasOlie/agyh/security/advisories/new), not here.**
+        Please remove tokens, chat ids, phone numbers and private transcript content from anything you paste.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. agyh connect telegram
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: agyh version
+      description: Output of `agyh --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options: [Linux, macOS, Windows, WSL]
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options: [TUI / search, Indexing (Claude Code), Indexing (Codex), Indexing (Antigravity), Projects, Resume, Hooks / approvals, Telegram, WhatsApp, Cloud vault / sync, Install]
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`agyh doctor` output"
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / extra context
+      render: text
