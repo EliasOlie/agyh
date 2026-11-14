@@ -1,0 +1,75 @@
+# https://goreleaser.com — run by .github/workflows/release.yml on every v* tag.
+version: 2
+
+project_name: agyh
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: agyh
+    main: ./cmd/agyh
+    binary: agyh
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: agyh
+    # Same names as previous releases: agyh_v0.2.0_linux_amd64.tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Tag }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other changes
+      order: 999
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+release:
+  github:
+    owner: EliasOlie
+    name: agyh
+  draft: false
+  prerelease: auto
+  footer: |
+    ### Install
+
+    ```bash
+    go install github.com/EliasOlie/agyh/cmd/agyh@{{ .Tag }}
+    ```
+
+    Or download a binary below. Verify its build provenance with:
+
+    ```bash
+    gh attestation verify <file> --repo EliasOlie/agyh
+    ```

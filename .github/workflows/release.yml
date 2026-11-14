@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Dry run: build every archive without publishing when the release setup changes.
+  pull_request:
+    paths:
+      - .goreleaser.yaml
+      - .github/workflows/release.yml
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the GitHub release and upload assets
+      id-token: write      # sign build provenance (Sigstore)
+      attestations: write  # store the attestation on GitHub
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # GoReleaser needs the full history and tags for the changelog
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: ${{ github.event_name == 'pull_request' && 'release --snapshot --clean' || 'release --clean' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: List artifacts
+        run: ls -l dist/*.tar.gz dist/*.zip dist/checksums.txt
+      - if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
