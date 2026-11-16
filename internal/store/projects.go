@@ -141,3 +141,29 @@ func (s *Store) Notes(ctx context.Context, project string) (map[string]string, e
 	}
 	return out, rows.Err()
 }
+
+// ProjectMap returns all project names and notes for each session, keyed by "agent:id".
+func (s *Store) ProjectMap(ctx context.Context) (map[string][]string, map[string]map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT project, agent, id, note FROM project_sessions`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	projects := map[string][]string{}
+	notes := map[string]map[string]string{}
+	for rows.Next() {
+		var p, a, id, note string
+		if err := rows.Scan(&p, &a, &id, &note); err != nil {
+			return nil, nil, err
+		}
+		key := a + ":" + id
+		projects[key] = append(projects[key], p)
+		if note != "" {
+			if notes[key] == nil {
+				notes[key] = map[string]string{}
+			}
+			notes[key][p] = note
+		}
+	}
+	return projects, notes, rows.Err()
+}
