@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/EliasOlie/agyh/internal/agentkit"
 	"github.com/EliasOlie/agyh/internal/config"
 	"github.com/EliasOlie/agyh/internal/hook"
 	"github.com/EliasOlie/agyh/internal/policy"
@@ -56,6 +57,10 @@ type Bridge struct {
 	vaultSync func(context.Context) (vaultsync.SyncResult, error)
 	syncing   atomic.Bool
 
+	homes                       func() []agentkit.Home
+	ledgerPath, propagationPath string
+	propagating                 sync.Mutex
+
 	mu       sync.RWMutex
 	channels []Channel
 }
@@ -67,6 +72,11 @@ type Options struct {
 	StatePath string
 	Logger    *slog.Logger
 	Runner    Runner
+	// Skill propagation (see propagate.go): the agents to watch, agyh's
+	// install ledger and the propagation state. Homes defaults to agentkit.All.
+	Homes           func() []agentkit.Home
+	LedgerPath      string
+	PropagationPath string
 }
 
 func New(o Options) *Bridge {
@@ -82,6 +92,10 @@ func New(o Options) *Bridge {
 	b := &Bridge{cfg: o.Config, store: o.Store, policy: o.Policy, approvals: NewApprovals(o.StatePath),
 		log: o.Logger, runner: o.Runner}
 	b.vaultSync = b.runVaultSync
+	b.homes, b.ledgerPath, b.propagationPath = o.Homes, o.LedgerPath, o.PropagationPath
+	if b.homes == nil {
+		b.homes = agentkit.All
+	}
 	return b
 }
 
@@ -201,36 +215,38 @@ func (b *Bridge) handleApproval(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	key := in.Request.Agent + ":" + in.Request.SessionID
-	if in.Request.SessionID != "" && b.approvals.IsAuto(key) {
-		writeJSON(w, http.StatusOK, ApprovalResponse{ID: in.ID, Verdict: "allow", Reason: "autonomous mode", By: "auto"})
-		return
+	d, id := b.AskHuman(r.Context(), in.ID, in.Request)
+	writeJSON(w, http.StatusOK, ApprovalResponse{ID: id, Verdict: d.Verdict.String(), Reason: d.Reason, By: d.By})
+}
+
+// AskHuman sends a request to every chat channel and waits for the first
+// answer, the approval timeout, or ctx. Sessions in autonomous mode are
+// allowed at once; with no channel connected the answer is Ask. It also
+// returns the approval id actually used (a duplicate or invalid id is replaced).
+func (b *Bridge) AskHuman(ctx context.Context, id string, req hook.Request) (Decision, string) {
+	if req.SessionID != "" && b.approvals.IsAuto(req.Agent+":"+req.SessionID) {
+		return Decision{Verdict: policy.Allow, Reason: "autonomous mode", By: "auto"}, id
 	}
 	channels := b.Channels()
 	if len(channels) == 0 {
-		writeJSON(w, http.StatusOK, ApprovalResponse{ID: in.ID, Verdict: "ask", Reason: "no chat channel connected", By: "bridge"})
-		return
+		return Decision{Verdict: policy.Ask, Reason: "no chat channel connected", By: "bridge"}, id
 	}
-
-	ap := b.approvals.Create(in.ID, in.Request)
+	ap := b.approvals.Create(id, req)
 	for _, c := range channels {
-		if err := c.PromptApproval(r.Context(), ap); err != nil {
+		if err := c.PromptApproval(ctx, ap); err != nil {
 			b.log.Warn("prompt approval failed", "channel", c.Name(), "err", err)
 		}
 	}
-
 	timer := time.NewTimer(b.cfg.ApprovalTimeout())
 	defer timer.Stop()
-	var d Decision
 	select {
 	case <-ap.Done():
-		d = ap.Decision()
+		return ap.Decision(), ap.ID
 	case <-timer.C:
-		d = b.Decide(context.Background(), ap.ID, Decision{Verdict: policy.Ask, Reason: "no answer in time", By: "timeout"}, false)
-	case <-r.Context().Done(): // the hook gave up (agent cancelled, or answered in the terminal)
-		d = b.Decide(context.Background(), ap.ID, Decision{Verdict: policy.Ask, Reason: "request cancelled", By: "cancelled"}, false)
+		return b.Decide(context.Background(), ap.ID, Decision{Verdict: policy.Ask, Reason: "no answer in time", By: "timeout"}, false), ap.ID
+	case <-ctx.Done(): // the hook gave up (agent cancelled, or answered in the terminal)
+		return b.Decide(context.Background(), ap.ID, Decision{Verdict: policy.Ask, Reason: "request cancelled", By: "cancelled"}, false), ap.ID
 	}
-	writeJSON(w, http.StatusOK, ApprovalResponse{ID: ap.ID, Verdict: d.Verdict.String(), Reason: d.Reason, By: d.By})
 }
 
 func (b *Bridge) handleExternalDecision(w http.ResponseWriter, r *http.Request) {

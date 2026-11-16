@@ -67,6 +67,12 @@ type Config struct {
 	// ManageAgents allows agyh to install skills into agents' folders
 	// (agyh skills link/unlink). Off by default: agyh only reads agent files.
 	ManageAgents bool `json:"manage_agents,omitempty"`
+	// AutoPropagate lets the bridge offer every new or changed skill to the
+	// agents that lack it, asking on Telegram/WhatsApp first. Needs ManageAgents.
+	AutoPropagate bool `json:"auto_propagate,omitempty"`
+	// Catalogs are extra plugin marketplaces searched by `agyh skills search`:
+	// github:owner/repo (its .claude-plugin/marketplace.json) or an https URL.
+	Catalogs []string `json:"catalogs,omitempty"`
 
 	path string
 }

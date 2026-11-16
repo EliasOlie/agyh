@@ -118,6 +118,9 @@ agyh -p pagamentos           # browser inside one project
 | `agyh skills` | Agent Skills installed in each agent, grouped by name, with differing copies flagged. `--agent`, `--all` (include skills bundled with the agents), `--json`. |
 | `agyh skills link <skill>… --to <agents>` | Copy a skill into other agents (e.g. from Antigravity into Claude Code and Codex), or `--all --from kit` after a restore. Opt-in, tracked, never overwrites your files. `--dry-run` previews. |
 | `agyh skills unlink <skill>…` / `agyh skills links` | Remove skills agyh installed (only its own, unedited copies) / list them. |
+| `agyh skills search <words>` | Find skills and plugins in marketplace catalogs and on GitHub. `--offline`, `--json`. |
+| `agyh skills install <github:owner/repo[/path][@rev] \| plugin@catalog> --to <agents>` | Fetch at an exact commit, preview (skills and scripts), confirm, install. `--dry-run`, `--yes`. |
+| `agyh mcp apply <server>… --to <agents>` / `agyh mcp remove` / `agyh mcp links` | Copy MCP servers (with their tokens) between agents, converting formats; tracked and reversible. |
 | `agyh mcp` | MCP servers configured in each agent, grouped by name. Secrets are never shown. `--agent`, `--json`. |
 | `agyh doctor` | Check agents, index, channels and bridge. |
 
@@ -273,7 +276,7 @@ agyh can approve shell commands, so it is built to fail closed:
 - Only the paired Telegram chat id, or your own WhatsApp "Message yourself" chat, can send commands or press buttons.
 - The bridge re-checks the policy itself, so even a misconfigured hook or autonomous session cannot get a fatal command approved.
 - The bot token never appears in errors or logs. Network errors from the Bot API are stripped of the URL.
-- Agent data is opened **read-only** (`mode=ro` for SQLite). agyh writes its own files (the index, the kit under `~/.local/share/agyh/kit/`) and, **only if you enable `"manage_agents": true` and run `agyh skills link`**, skill folders inside agents' skill directories. It never touches a folder it did not create, nor one it created that you edited since; every install is recorded in `~/.local/share/agyh/links.json` and can be undone with `agyh skills unlink`.
+- Agent data is opened **read-only** (`mode=ro` for SQLite). agyh writes its own files (the index, the kit under `~/.local/share/agyh/kit/`) and, **only if you enable `"manage_agents": true`**, skill folders and MCP servers inside agents' configuration (`agyh skills link/install`, `agyh mcp apply`, and bridge propagation you approve on chat). It never touches a skill folder or MCP server it did not create, nor one it created that you edited since; every change is recorded in `~/.local/share/agyh/links.json` and can be undone (`agyh skills unlink`, `agyh mcp remove`). Claude Code's config is only changed through its own CLI.
 - The vault holds your **MCP tokens** (encrypted): whoever has the bucket *and* your passphrase has them too. Use a strong passphrase; `"kit": false` keeps them out of the vault.
 
 ## Configuration
@@ -288,6 +291,9 @@ agyh can approve shell commands, so it is built to fail closed:
   "approval_timeout_sec": 120,
   "runners": { "claude": ["claude", "-p", "{prompt}"] },
   "workspaces": ["/home/you/work/api", "/home/you/work/pdv"],
+  "manage_agents": false,
+  "auto_propagate": false,
+  "catalogs": ["github:owner/marketplace-repo"],
   "policy": { "safe": [], "fatal": [] },
   "sync": {
     "enabled": true,
@@ -376,6 +382,40 @@ This is the only place agyh writes into an agent's files, so it is off until you
 - If a folder changes between planning and writing, the write is refused.
 - When one name has different versions in different agents, agyh asks you to pick one with `--from`.
 - Antigravity can be a source, not a target: it has no documented folder for user skills (PRs welcome).
+
+**Automatic propagation, with your approval.** With `"auto_propagate": true` (and `manage_agents`), the running `agyh bridge` notices a skill that appears or changes in one agent and asks on Telegram/WhatsApp before installing it into the agents that lack it: ✅ installs, ❌ never asks again for that version, ⚡ approves future propagations (until `/auto off skills-propagation`). Skills that already existed when you enabled it are only recorded, never offered all at once; use `agyh skills link --all` for those. Unanswered prompts are asked again after a day.
+
+#### MCP servers across agents
+
+```bash
+agyh mcp apply github --to agy,codex --dry-run   # preview
+agyh mcp apply github --to agy,codex             # same server, tokens included, in each agent's format
+agyh mcp apply --all --from kit                  # after `agyh sync restore`
+agyh mcp links                                   # what agyh added
+agyh mcp remove github --agent codex             # undo
+```
+
+Same rules as skills (opt-in, tracked, never replaces a server you configured or edited). How each agent is written, user scope:
+
+| Agent | How |
+|---|---|
+| Claude Code | Through its own CLI (`claude mcp add-json` / `claude mcp remove`). `~/.claude.json` is rewritten by Claude Code all the time and is never edited directly. |
+| Antigravity | `mcp_config.json`, edited in place: other servers and keys keep their content, and the previous file is saved as `mcp_config.json.agyh-backup`. |
+| Codex ⚠️ | A block between `# agyh:begin` / `# agyh:end` markers appended to `config.toml`, so your comments and layout are kept; `agyh mcp remove` deletes exactly that block. Untested against a real Codex install. |
+
+Settings that have no equivalent in the target agent (Codex's tool allow-lists or timeouts, for example) are listed when you apply, never silently dropped. `sse` servers land as `http` in agents without `sse`.
+
+#### Finding new skills
+
+```bash
+agyh skills search pdf                                       # marketplace catalogs + GitHub
+agyh skills install github:anthropics/skills/skills/pdf --to claude,codex --dry-run
+agyh skills install some-plugin@some-marketplace --to codex
+```
+
+`search` looks in the plugin marketplaces Claude Code has downloaded, in any catalog listed under `"catalogs"` (a `github:owner/repo` publishing `.claude-plugin/marketplace.json`, or an https URL), and in GitHub repositories tagged `agent-skills` or `claude-skills` (set `GITHUB_TOKEN` for higher rate limits; it is sent to GitHub only, never printed).
+
+`install` pins what it fetches to an **exact commit**, shows a preview (each skill, its description, and every script your agents could run, with a link to review that commit), asks before installing (`--yes` skips the question, `--dry-run` stops after the preview) and installs through the same ledger as `agyh skills link`. Downloads are treated as untrusted: only regular files with clean relative paths are extracted, within size limits. Plugins that are not on GitHub are listed with a hint to install them with their agent.
 
 ⚠️ **Codex support follows [OpenAI's public docs](https://learn.chatgpt.com/docs/build-skills) and has not been tested against a real Codex install.** If it misreads yours, please [open an issue](https://github.com/EliasOlie/agyh/issues/new/choose) or, even better, a PR with a fixture in `internal/agentkit/agentkit_test.go`.
 

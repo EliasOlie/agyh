@@ -92,7 +92,7 @@ Skills bundled with an agent itself are hidden unless --all is given.
 	cmd.Flags().StringVarP(&agent, "agent", "a", "", "only this agent (claude, agy, codex)")
 	cmd.Flags().BoolVar(&all, "all", false, "include skills bundled with the agents themselves")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
-	cmd.AddCommand(skillsLinkCmd(), skillsUnlinkCmd(), skillsLinksCmd())
+	cmd.AddCommand(skillsLinkCmd(), skillsUnlinkCmd(), skillsLinksCmd(), skillsSearchCmd(), skillsInstallCmd())
 	return cmd
 }
 
@@ -212,6 +212,7 @@ variables (never their values). Header values are never read out.
 	}
 	cmd.Flags().StringVarP(&agent, "agent", "a", "", "only this agent (claude, agy, codex)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	cmd.AddCommand(mcpApplyCmd(), mcpRemoveCmd(), mcpLinksCmd())
 	return cmd
 }
 

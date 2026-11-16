@@ -64,7 +64,8 @@ type Link struct {
 // Ledger records every skill folder agyh installed.
 type Ledger struct {
 	path  string
-	Links []Link `json:"links"`
+	Links []Link    `json:"links"`
+	MCP   []MCPLink `json:"mcp,omitempty"`
 }
 
 // LoadLedger reads the ledger at path (empty if missing).
@@ -89,6 +90,7 @@ func (l *Ledger) Save() error {
 		return err
 	}
 	slices.SortFunc(l.Links, func(a, b Link) int { return strings.Compare(a.Agent+a.Path, b.Agent+b.Path) })
+	slices.SortFunc(l.MCP, func(a, b MCPLink) int { return strings.Compare(a.Agent+a.Name, b.Agent+b.Name) })
 	raw, err := json.MarshalIndent(l, "", "  ")
 	if err != nil {
 		return err
@@ -281,4 +283,32 @@ func ScanKit(dir, machine string) ([]Skill, []error) {
 		out, errs = append(out, s...), append(errs, e...)
 	}
 	return out, errs
+}
+
+// ReadSkillDir reads one skill folder (anywhere, e.g. a fetched repository).
+func ReadSkillDir(dir, agent, scope, source string) (Skill, error) {
+	s, err := readSkill(dir)
+	s.Agent, s.Scope, s.Plugin = agent, scope, source
+	return s, err
+}
+
+// LocalCatalog is a plugin marketplace catalog Claude Code has downloaded.
+type LocalCatalog struct {
+	Name   string // marketplace name
+	File   string // its marketplace.json
+	Source string // where the marketplace comes from (github:owner/repo), if known
+}
+
+// Catalogs lists the marketplace catalogs under plugins/marketplaces/.
+func (c *Claude) Catalogs() []LocalCatalog {
+	sources := c.marketplaceSources()
+	dirs, _ := os.ReadDir(filepath.Join(c.plugins, "marketplaces"))
+	var out []LocalCatalog
+	for _, d := range dirs {
+		f := filepath.Join(c.plugins, "marketplaces", d.Name(), ".claude-plugin", "marketplace.json")
+		if fileExists(f) {
+			out = append(out, LocalCatalog{Name: d.Name(), File: f, Source: sources[d.Name()]})
+		}
+	}
+	return out
 }
