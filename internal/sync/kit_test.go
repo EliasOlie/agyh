@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/EliasOlie/agyh/internal/agentkit"
 	"github.com/EliasOlie/agyh/internal/config"
@@ -248,5 +249,63 @@ func TestMachineName(t *testing.T) {
 	}
 	if MachineName("") == "" {
 		t.Fatal("hostname fallback")
+	}
+}
+
+// Some S3 servers serve a failed or cut-short read right after an object is
+// overwritten. Syncing (with the kit), migrating and restoring must ride it out.
+func TestVaultSurvivesGlitchyReadsAfterOverwrite(t *testing.T) {
+	old := readRetryDelays
+	readRetryDelays = []time.Duration{0, 0}
+	t.Cleanup(func() { readRetryDelays = old })
+
+	v, cfg := newVault(t)
+	writeV1Vault(t, v, cfg.Passphrase, testSession(1), testSession(2))
+	v.mu.Lock()
+	v.glitchy = true
+	v.mu.Unlock()
+	ctx := context.Background()
+
+	m := kitMachine(t, cfg, "box", agentHome(t, true))
+	m.add(t, testSession(3))
+	for i := range 3 { // each sync rewrites the manifest, then reads it back
+		res, err := m.e.Sync(ctx)
+		if err != nil || res.Kit == nil || res.Kit.Skills != 2 {
+			t.Fatalf("sync %d: %+v %v", i, res.Kit, err)
+		}
+		m.add(t, testSession(10+i)) // something new to upload each time
+	}
+	if r, err := m.e.Migrate(ctx); err != nil || r.Uploaded != 2 {
+		t.Fatalf("migrate: %+v %v", r, err)
+	}
+	if st := m.status(t); st.LegacyEncryption || len(st.KitMachines) != 1 {
+		t.Fatalf("status: %+v", st)
+	}
+
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	fresh := kitMachine(t, cfg, "box", t.TempDir())
+	if r, err := fresh.e.Restore(ctx); err != nil || r.Downloaded != 5 { // 1, 2, 3, 10, 11 (12 was added after the last sync)
+		t.Fatalf("restore: %+v %v", r, err)
+	}
+	if r, err := fresh.e.RestoreKit(ctx, "box"); err != nil || r.Skills != 2 {
+		t.Fatalf("restore kit: %+v %v", r, err)
+	}
+}
+
+// Retries are for glitched reads only: a wrong passphrase fails at once.
+func TestWrongPassphraseIsNotRetried(t *testing.T) {
+	old := readRetryDelays
+	readRetryDelays = []time.Duration{time.Hour, time.Hour} // a retry would hang the test
+	t.Cleanup(func() { readRetryDelays = old })
+	_, cfg := newVault(t)
+	a := newMachine(t, cfg)
+	a.add(t, testSession(1))
+	if _, err := a.e.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Passphrase = "wrong"
+	b := newMachine(t, cfg)
+	if _, err := b.e.Status(context.Background()); !errors.Is(err, ErrInvalidPassphrase) {
+		t.Fatalf("wrong passphrase: %v", err)
 	}
 }
