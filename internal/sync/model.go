@@ -21,7 +21,8 @@ type SessionSummary struct {
 	Messages  int       `json:"messages"`
 	Status    string    `json:"status,omitempty"`
 	Parent    string    `json:"parent,omitempty"`
-	Hash      string    `json:"hash,omitempty"`
+	// Hash fingerprints the session's projects and notes (see metaHash); "" = none.
+	Hash string `json:"hash,omitempty"`
 }
 
 func (s SessionSummary) Key() string {
@@ -61,6 +62,10 @@ type Bundle struct {
 type Diff struct {
 	ToUpload   []model.Session
 	ToDownload []SessionSummary
+	// ToMerge are remote sessions whose project memberships or notes differ
+	// while the session itself is unchanged: only their projects are merged in.
+	ToMerge       []SessionSummary
+	LocalSessions int
 }
 
 // StatusReport summarizes the synchronization state.

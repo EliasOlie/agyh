@@ -2,8 +2,11 @@ package sync
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"testing"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
 func TestCryptoRoundtripEncrypted(t *testing.T) {
@@ -74,5 +77,19 @@ func TestCryptoPlainRoundtrip(t *testing.T) {
 
 	if !bytes.Equal(decrypted, data) {
 		t.Fatalf("decrypted %q != original %q", decrypted, data)
+	}
+}
+
+// The derived-key cache must not change the key: blobs written before it
+// existed (and by other machines) must still decrypt.
+func TestDeriveKeyCacheMatchesPBKDF2(t *testing.T) {
+	fresh := pbkdf2.Key([]byte("cache-check"), pbkdf2Salt, pbkdf2Iter, 32, sha256.New)
+	for range 2 { // miss, then hit
+		if !bytes.Equal(deriveKey("cache-check"), fresh) {
+			t.Fatal("cached key differs from PBKDF2")
+		}
+	}
+	if bytes.Equal(deriveKey("other-passphrase"), fresh) {
+		t.Fatal("different passphrases share a key")
 	}
 }
