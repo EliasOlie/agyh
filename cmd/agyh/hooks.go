@@ -32,7 +32,7 @@ func (a *app) hookCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
-			req, err := hook.Parse(agent, os.Stdin)
+			req, err := hook.Parse(agent, cmd.InOrStdin())
 			if err != nil {
 				out.Write(hook.Output(agent, policy.Ask, err.Error()))
 				return nil
@@ -55,7 +55,7 @@ func (a *app) hookCmd() *cobra.Command {
 		Short: "Notify your phone that the agent finished, with its last message",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			req, err := hook.Parse(agent, os.Stdin)
+			req, err := hook.Parse(agent, cmd.InOrStdin())
 			if err != nil {
 				return nil // never break the agent because of a notification
 			}
