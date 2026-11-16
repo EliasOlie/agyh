@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -27,8 +28,17 @@ var (
 	ErrPassphraseMissing = errors.New("vault data is encrypted: passphrase is required")
 )
 
+// derivedKeys caches deriveKey: the salt is fixed, so the key depends only on
+// the passphrase, and 100k PBKDF2 rounds per blob dominated sync time.
+var derivedKeys sync.Map // passphrase -> []byte
+
 func deriveKey(passphrase string) []byte {
-	return pbkdf2.Key([]byte(passphrase), pbkdf2Salt, pbkdf2Iter, 32, sha256.New)
+	if k, ok := derivedKeys.Load(passphrase); ok {
+		return k.([]byte)
+	}
+	k := pbkdf2.Key([]byte(passphrase), pbkdf2Salt, pbkdf2Iter, 32, sha256.New)
+	derivedKeys.Store(passphrase, k)
+	return k
 }
 
 // CompressAndEncrypt compresses payload with gzip and, if passphrase is not empty,

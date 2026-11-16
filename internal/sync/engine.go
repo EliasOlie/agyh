@@ -2,12 +2,19 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/EliasOlie/agyh/internal/config"
 	"github.com/EliasOlie/agyh/internal/model"
@@ -105,64 +112,118 @@ func (e *Engine) saveManifest(ctx context.Context, m *Manifest) error {
 	return nil
 }
 
+// syncWorkers bounds concurrent vault transfers: enough to hide S3 round-trip
+// latency, few enough to stay polite to a small self-hosted S3.
+const syncWorkers = 6
+
+// metaHash fingerprints a session's project memberships and notes, so that
+// saving a session into a project or editing a note reaches the vault even
+// though the session itself did not change. "" means "no projects", which is
+// also what manifests written before this field was used contain.
+func metaHash(projects []string, notes map[string]string) string {
+	if len(projects) == 0 {
+		return ""
+	}
+	ps := slices.Compact(slices.Sorted(slices.Values(projects)))
+	h := sha256.New()
+	for _, p := range ps {
+		fmt.Fprintf(h, "%q=%q\n", p, notes[p])
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+func summaryOf(s model.Session, hash string) SessionSummary {
+	return SessionSummary{
+		Agent: s.Agent, ID: s.ID, Title: s.Title, Workspace: s.Workspace,
+		StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt, Messages: s.Messages,
+		Status: s.Status, Parent: s.Parent, Hash: hash,
+	}
+}
+
+// localState is a snapshot of the local index used to plan a sync.
+type localState struct {
+	sessions []model.Session
+	byKey    map[string]model.Session
+	projects map[string][]string
+	notes    map[string]map[string]string
+}
+
+func (e *Engine) local(ctx context.Context) (*localState, error) {
+	sessions, err := e.st.AllSessions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list local sessions: %w", err)
+	}
+	projects, notes, err := e.st.ProjectMap(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read local projects: %w", err)
+	}
+	l := &localState{sessions: sessions, byKey: make(map[string]model.Session, len(sessions)),
+		projects: projects, notes: notes}
+	for _, s := range sessions {
+		l.byKey[s.Key()] = s
+	}
+	return l, nil
+}
+
+func (l *localState) hash(key string) string { return metaHash(l.projects[key], l.notes[key]) }
+
 // Diff compares local sessions and remote manifest sessions.
+//
+//   - A newer side wins: newer local sessions are uploaded, newer remote ones downloaded.
+//   - With equal timestamps, differing project fingerprints are reconciled:
+//     remote memberships are merged in (ToMerge, never removing one) and
+//     a local side that has projects is uploaded so the vault gets the union.
 func (e *Engine) Diff(ctx context.Context) (Diff, *Manifest, error) {
 	m, err := e.fetchManifest(ctx)
 	if err != nil {
 		return Diff{}, nil, err
 	}
-
-	localSessions, err := e.st.AllSessions(ctx)
+	l, err := e.local(ctx)
 	if err != nil {
-		return Diff{}, nil, fmt.Errorf("list local sessions: %w", err)
+		return Diff{}, nil, err
 	}
+	return planDiff(m, l), m, nil
+}
 
-	localMap := make(map[string]model.Session, len(localSessions))
-	for _, s := range localSessions {
-		localMap[s.Key()] = s
-	}
-
-	var toUpload []model.Session
-	for _, local := range localSessions {
-		rem, ok := m.Sessions[local.Key()]
-		if !ok || local.UpdatedAt.After(rem.UpdatedAt) {
-			toUpload = append(toUpload, local)
+func planDiff(m *Manifest, l *localState) Diff {
+	d := Diff{LocalSessions: len(l.sessions)}
+	for _, local := range l.sessions {
+		key := local.Key()
+		rem, ok := m.Sessions[key]
+		lh := l.hash(key)
+		switch {
+		case !ok, local.UpdatedAt.After(rem.UpdatedAt):
+			d.ToUpload = append(d.ToUpload, local)
+		case local.UpdatedAt.Equal(rem.UpdatedAt) && lh != rem.Hash:
+			if lh != "" {
+				d.ToUpload = append(d.ToUpload, local)
+			}
+			if rem.Hash != "" {
+				d.ToMerge = append(d.ToMerge, rem)
+			}
 		}
 	}
-
-	var toDownload []SessionSummary
 	for key, rem := range m.Sessions {
-		local, ok := localMap[key]
-		if !ok || rem.UpdatedAt.After(local.UpdatedAt) {
-			toDownload = append(toDownload, rem)
+		if local, ok := l.byKey[key]; !ok || rem.UpdatedAt.After(local.UpdatedAt) {
+			d.ToDownload = append(d.ToDownload, rem)
 		}
 	}
-
-	return Diff{ToUpload: toUpload, ToDownload: toDownload}, m, nil
+	return d
 }
 
 // Status returns a high-level summary of the synchronization status.
 func (e *Engine) Status(ctx context.Context) (StatusReport, error) {
+	report := StatusReport{Enabled: true, Endpoint: e.cfg.Endpoint, Bucket: e.cfg.Bucket}
 	diff, m, err := e.Diff(ctx)
 	if err != nil {
-		return StatusReport{
-			Enabled:  true,
-			Endpoint: e.cfg.Endpoint,
-			Bucket:   e.cfg.Bucket,
-		}, err
+		return report, err
 	}
-
-	localSessions, _ := e.st.AllSessions(ctx)
-	return StatusReport{
-		Enabled:        true,
-		Endpoint:       e.cfg.Endpoint,
-		Bucket:         e.cfg.Bucket,
-		LocalSessions:  len(localSessions),
-		RemoteSessions: len(m.Sessions),
-		ToUpload:       len(diff.ToUpload),
-		ToDownload:     len(diff.ToDownload),
-		LastSynced:     m.UpdatedAt,
-	}, nil
+	report.LocalSessions = diff.LocalSessions
+	report.RemoteSessions = len(m.Sessions)
+	report.ToUpload = len(diff.ToUpload)
+	report.ToDownload = len(diff.ToDownload) + len(diff.ToMerge)
+	report.LastSynced = m.UpdatedAt
+	return report, nil
 }
 
 // UploadSession packages, encrypts and uploads a single session.
@@ -194,21 +255,27 @@ func (e *Engine) UploadSession(ctx context.Context, sess model.Session, projectM
 	return e.s3.Put(ctx, e.sessionKey(sess.Agent, sess.ID), encrypted)
 }
 
-// DownloadSession fetches, decrypts and stores a single remote session locally.
-func (e *Engine) DownloadSession(ctx context.Context, summary SessionSummary) error {
+func (e *Engine) fetchBundle(ctx context.Context, summary SessionSummary) (Bundle, error) {
 	data, err := e.s3.Get(ctx, e.sessionKey(summary.Agent, summary.ID))
 	if err != nil {
-		return fmt.Errorf("get session blob %s: %w", summary.Key(), err)
+		return Bundle{}, fmt.Errorf("get session blob %s: %w", summary.Key(), err)
 	}
-
 	decrypted, err := DecryptAndDecompress(data, e.cfg.Passphrase)
 	if err != nil {
-		return fmt.Errorf("decrypt session blob %s: %w", summary.Key(), err)
+		return Bundle{}, fmt.Errorf("decrypt session blob %s: %w", summary.Key(), err)
 	}
-
 	var bundle Bundle
 	if err := json.Unmarshal(decrypted, &bundle); err != nil {
-		return fmt.Errorf("decode session bundle %s: %w", summary.Key(), err)
+		return Bundle{}, fmt.Errorf("decode session bundle %s: %w", summary.Key(), err)
+	}
+	return bundle, nil
+}
+
+// DownloadSession fetches, decrypts and stores a single remote session locally.
+func (e *Engine) DownloadSession(ctx context.Context, summary SessionSummary) error {
+	bundle, err := e.fetchBundle(ctx, summary)
+	if err != nil {
+		return err
 	}
 
 	// Save messages to local archive directory
@@ -222,88 +289,170 @@ func (e *Engine) DownloadSession(ctx context.Context, summary SessionSummary) er
 	if err := e.st.Upsert(ctx, bundle.Session, bundle.Messages); err != nil {
 		return fmt.Errorf("upsert store %s: %w", summary.Key(), err)
 	}
+	return e.applyProjects(ctx, bundle)
+}
 
-	// Restore project associations
+// mergeProjects adds a remote session's project memberships and notes to the
+// local index without touching the session itself.
+func (e *Engine) mergeProjects(ctx context.Context, summary SessionSummary) error {
+	bundle, err := e.fetchBundle(ctx, summary)
+	if err != nil {
+		return err
+	}
+	return e.applyProjects(ctx, bundle)
+}
+
+// applyProjects only ever adds memberships (a non-empty remote note replaces
+// the local one). A project name the local validator rejects is skipped rather
+// than failing the whole sync; database errors are returned.
+func (e *Engine) applyProjects(ctx context.Context, bundle Bundle) error {
 	for _, p := range bundle.Projects {
-		note := bundle.Notes[p]
-		_ = e.st.AddToProject(ctx, p, bundle.Session, note)
+		if store.ValidProjectName(p) != nil {
+			continue
+		}
+		if err := e.st.AddToProject(ctx, p, bundle.Session, bundle.Notes[p]); err != nil {
+			return fmt.Errorf("restore project %s for %s: %w", p, bundle.Session.Key(), err)
+		}
 	}
 	return nil
 }
 
-// Sync performs bidirectional synchronization.
+// each runs fn for every index in [0, n) on up to syncWorkers goroutines.
+// One failing transfer does not cancel the others: every item is attempted,
+// successes are kept, and all errors are returned joined. Cancelling ctx
+// (Ctrl+C) still stops the remaining work.
+func each(ctx context.Context, n int, fn func(ctx context.Context, i int) error) error {
+	var (
+		g    errgroup.Group
+		mu   sync.Mutex
+		errs []error
+	)
+	g.SetLimit(syncWorkers)
+	for i := range n {
+		if ctx.Err() != nil {
+			break
+		}
+		g.Go(func() error {
+			if err := fn(ctx, i); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
+	if err := ctx.Err(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// uploadAll uploads sessions concurrently and records each success in the
+// manifest, so a partial failure still leaves a manifest worth saving.
+func (e *Engine) uploadAll(ctx context.Context, m *Manifest, sessions []model.Session, l *localState) (int, error) {
+	var mu sync.Mutex
+	n := 0
+	err := each(ctx, len(sessions), func(ctx context.Context, i int) error {
+		s := sessions[i]
+		if err := e.UploadSession(ctx, s, l.projects, l.notes); err != nil {
+			return fmt.Errorf("upload %s: %w", s.Key(), err)
+		}
+		mu.Lock()
+		m.Sessions[s.Key()] = summaryOf(s, l.hash(s.Key()))
+		n++
+		mu.Unlock()
+		return nil
+	})
+	return n, err
+}
+
+func countEach(ctx context.Context, items []SessionSummary, fn func(context.Context, SessionSummary) error) (int, error) {
+	var n atomic.Int64
+	err := each(ctx, len(items), func(ctx context.Context, i int) error {
+		if err := fn(ctx, items[i]); err != nil {
+			return err
+		}
+		n.Add(1)
+		return nil
+	})
+	return int(n.Load()), err
+}
+
+// mergeProjectList adds local projects missing from the manifest and fills
+// empty descriptions. It reports whether the manifest changed.
+func mergeProjectList(m *Manifest, local []store.Project) bool {
+	changed := false
+	for _, lp := range local {
+		i := slices.IndexFunc(m.Projects, func(rp store.Project) bool { return rp.Name == lp.Name })
+		switch {
+		case i < 0:
+			m.Projects = append(m.Projects, lp)
+			changed = true
+		case lp.Description != "" && m.Projects[i].Description == "":
+			m.Projects[i].Description = lp.Description
+			changed = true
+		}
+	}
+	return changed
+}
+
+// Sync performs bidirectional synchronization. Remote changes are applied
+// first, so the uploads that follow carry the merged project memberships.
 func (e *Engine) Sync(ctx context.Context) (SyncResult, error) {
-	diff, m, err := e.Diff(ctx)
+	m, err := e.fetchManifest(ctx)
 	if err != nil {
 		return SyncResult{}, err
 	}
-
-	projectMap, notesMap, err := e.st.ProjectMap(ctx)
+	l, err := e.local(ctx)
 	if err != nil {
-		return SyncResult{}, fmt.Errorf("read local projects: %w", err)
+		return SyncResult{}, err
+	}
+	diff := planDiff(m, l)
+
+	var res SyncResult
+	if res.Downloaded, err = countEach(ctx, diff.ToDownload, func(ctx context.Context, s SessionSummary) error {
+		if err := e.DownloadSession(ctx, s); err != nil {
+			return fmt.Errorf("download %s: %w", s.Key(), err)
+		}
+		return nil
+	}); err != nil {
+		return res, err
+	}
+	if _, err = countEach(ctx, diff.ToMerge, func(ctx context.Context, s SessionSummary) error {
+		if err := e.mergeProjects(ctx, s); err != nil {
+			return fmt.Errorf("merge projects %s: %w", s.Key(), err)
+		}
+		return nil
+	}); err != nil {
+		return res, err
 	}
 
-	var (
-		res SyncResult
-		mu  sync.Mutex
-	)
-
-	// 1. Upload local changes
-	for _, sess := range diff.ToUpload {
-		if err := e.UploadSession(ctx, sess, projectMap, notesMap); err != nil {
-			return res, fmt.Errorf("upload %s: %w", sess.Key(), err)
-		}
-		m.Sessions[sess.Key()] = SessionSummary{
-			Agent:     sess.Agent,
-			ID:        sess.ID,
-			Title:     sess.Title,
-			Workspace: sess.Workspace,
-			StartedAt: sess.StartedAt,
-			UpdatedAt: sess.UpdatedAt,
-			Messages:  sess.Messages,
-			Status:    sess.Status,
-			Parent:    sess.Parent,
-		}
-		mu.Lock()
-		res.Uploaded++
-		mu.Unlock()
-	}
-
-	// 2. Download remote changes
-	for _, summary := range diff.ToDownload {
-		if err := e.DownloadSession(ctx, summary); err != nil {
-			return res, fmt.Errorf("download %s: %w", summary.Key(), err)
-		}
-		mu.Lock()
-		res.Downloaded++
-		mu.Unlock()
-	}
-
-	// 3. Sync project metadata into manifest
-	localProjects, _ := e.st.Projects(ctx)
-	for _, lp := range localProjects {
-		found := false
-		for i, rp := range m.Projects {
-			if rp.Name == lp.Name {
-				found = true
-				if lp.Description != "" && rp.Description == "" {
-					m.Projects[i].Description = lp.Description
-				}
-				break
-			}
-		}
-		if !found {
-			m.Projects = append(m.Projects, lp)
-		}
-	}
-
-	// 4. Save updated manifest to S3
-	if res.Uploaded > 0 || res.Downloaded > 0 || len(diff.ToUpload) > 0 {
-		if err := e.saveManifest(ctx, m); err != nil {
+	if len(diff.ToDownload)+len(diff.ToMerge) > 0 {
+		if l, err = e.local(ctx); err != nil {
 			return res, err
 		}
 	}
+	// A merge may have made both sides equal: skip uploads that would change nothing.
+	toUpload := slices.DeleteFunc(diff.ToUpload, func(s model.Session) bool {
+		rem, ok := m.Sessions[s.Key()]
+		return ok && s.UpdatedAt.Equal(rem.UpdatedAt) && l.hash(s.Key()) == rem.Hash
+	})
+	var uploadErr error
+	res.Uploaded, uploadErr = e.uploadAll(ctx, m, toUpload, l)
 
+	localProjects, err := e.st.Projects(ctx)
+	if err != nil {
+		return res, errors.Join(uploadErr, fmt.Errorf("read local projects: %w", err))
+	}
+	if mergeProjectList(m, localProjects) || res.Uploaded > 0 {
+		if err := e.saveManifest(ctx, m); err != nil {
+			return res, errors.Join(uploadErr, err)
+		}
+	}
+	if uploadErr != nil {
+		return res, uploadErr
+	}
 	res.Total = len(m.Sessions)
 	res.Timestamp = time.Now()
 	return res, nil
@@ -315,73 +464,50 @@ func (e *Engine) Push(ctx context.Context) (SyncResult, error) {
 	if err != nil {
 		return SyncResult{}, err
 	}
-
-	localSessions, err := e.st.AllSessions(ctx)
+	l, err := e.local(ctx)
 	if err != nil {
 		return SyncResult{}, err
 	}
-
-	projectMap, notesMap, err := e.st.ProjectMap(ctx)
-	if err != nil {
-		return SyncResult{}, err
-	}
-
 	var res SyncResult
-	for _, sess := range localSessions {
-		if err := e.UploadSession(ctx, sess, projectMap, notesMap); err != nil {
-			return res, fmt.Errorf("upload %s: %w", sess.Key(), err)
+	var uploadErr error
+	res.Uploaded, uploadErr = e.uploadAll(ctx, m, l.sessions, l)
+	if res.Uploaded > 0 || uploadErr == nil {
+		if err := e.saveManifest(ctx, m); err != nil {
+			return res, errors.Join(uploadErr, err)
 		}
-		m.Sessions[sess.Key()] = SessionSummary{
-			Agent:     sess.Agent,
-			ID:        sess.ID,
-			Title:     sess.Title,
-			Workspace: sess.Workspace,
-			StartedAt: sess.StartedAt,
-			UpdatedAt: sess.UpdatedAt,
-			Messages:  sess.Messages,
-			Status:    sess.Status,
-			Parent:    sess.Parent,
-		}
-		res.Uploaded++
 	}
-
-	if err := e.saveManifest(ctx, m); err != nil {
-		return res, err
+	if uploadErr != nil {
+		return res, uploadErr
 	}
-
 	res.Total = len(m.Sessions)
 	res.Timestamp = time.Now()
 	return res, nil
 }
 
-// Pull downloads all remote sessions that are missing or newer.
+// Pull downloads all remote sessions that are missing or newer, and merges
+// project memberships changed on other machines. It never uploads.
 func (e *Engine) Pull(ctx context.Context) (SyncResult, error) {
-	m, err := e.fetchManifest(ctx)
+	diff, m, err := e.Diff(ctx)
 	if err != nil {
 		return SyncResult{}, err
 	}
-
-	localSessions, err := e.st.AllSessions(ctx)
-	if err != nil {
-		return SyncResult{}, err
-	}
-
-	localMap := make(map[string]model.Session, len(localSessions))
-	for _, s := range localSessions {
-		localMap[s.Key()] = s
-	}
-
 	var res SyncResult
-	for key, summary := range m.Sessions {
-		local, ok := localMap[key]
-		if !ok || summary.UpdatedAt.After(local.UpdatedAt) {
-			if err := e.DownloadSession(ctx, summary); err != nil {
-				return res, fmt.Errorf("download %s: %w", key, err)
-			}
-			res.Downloaded++
+	if res.Downloaded, err = countEach(ctx, diff.ToDownload, func(ctx context.Context, s SessionSummary) error {
+		if err := e.DownloadSession(ctx, s); err != nil {
+			return fmt.Errorf("download %s: %w", s.Key(), err)
 		}
+		return nil
+	}); err != nil {
+		return res, err
 	}
-
+	if _, err = countEach(ctx, diff.ToMerge, func(ctx context.Context, s SessionSummary) error {
+		if err := e.mergeProjects(ctx, s); err != nil {
+			return fmt.Errorf("merge projects %s: %w", s.Key(), err)
+		}
+		return nil
+	}); err != nil {
+		return res, err
+	}
 	res.Total = len(m.Sessions)
 	res.Timestamp = time.Now()
 	return res, nil
@@ -393,15 +519,16 @@ func (e *Engine) Restore(ctx context.Context) (SyncResult, error) {
 	if err != nil {
 		return SyncResult{}, err
 	}
-
+	all := slices.Collect(maps.Values(m.Sessions))
 	var res SyncResult
-	for key, summary := range m.Sessions {
-		if err := e.DownloadSession(ctx, summary); err != nil {
-			return res, fmt.Errorf("restore %s: %w", key, err)
+	if res.Downloaded, err = countEach(ctx, all, func(ctx context.Context, s SessionSummary) error {
+		if err := e.DownloadSession(ctx, s); err != nil {
+			return fmt.Errorf("restore %s: %w", s.Key(), err)
 		}
-		res.Downloaded++
+		return nil
+	}); err != nil {
+		return res, err
 	}
-
 	res.Total = len(m.Sessions)
 	res.Timestamp = time.Now()
 	return res, nil
