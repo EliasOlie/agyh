@@ -41,6 +41,7 @@ Agent CLIs keep history per tool and per folder. After a few weeks you have hund
 | **Autonomous mode** | One tap allows the rest of a session, while fatal commands stay blocked. |
 | **Drive agents from chat** | `/chats`, `/search`, `/show`, `/save`, `/projects`, `/new` (start a headless session in a whitelisted workspace). |
 | **WhatsApp onboarding in the terminal** | `agyh connect whatsapp` prints the pairing QR code right in your terminal. |
+| **Skills & MCP at a glance** | `agyh skills` and `agyh mcp` show which Agent Skills and MCP servers each agent has, which copies differ, and never print a secret. Read-only. |
 | **Scriptable** | Every list command has `--json`. |
 
 ## Install
@@ -114,6 +115,8 @@ agyh -p pagamentos           # browser inside one project
 | `agyh connect telegram\|whatsapp` | Pair a chat channel. |
 | `agyh bridge` | Run the daemon that connects hooks and chat. |
 | `agyh install-hooks claude\|agy` | Print the hook config to paste into your agent. |
+| `agyh skills` | Agent Skills installed in each agent, grouped by name, with differing copies flagged. `--agent`, `--all` (include skills bundled with the agents), `--json`. |
+| `agyh mcp` | MCP servers configured in each agent, grouped by name. Secrets are never shown. `--agent`, `--json`. |
 | `agyh doctor` | Check agents, index, channels and bridge. |
 
 ## Remote control
@@ -308,6 +311,20 @@ systemctl --user enable --now agyh-bridge
 | Codex | `sessions/YYYY/MM/DD/rollout-*.jsonl` | `response_item` messages; environment and instruction preambles dropped |
 
 Adding an agent means implementing one interface (`internal/source`): `Refs` (list cheaply), `Load` (parse one session), `Resume` (argv to reopen).
+
+### Skills and MCP servers
+
+`agyh skills` and `agyh mcp` only read these files; nothing is ever written to an agent's configuration.
+
+| Agent | Skills | MCP servers |
+|---|---|---|
+| Claude Code | `~/.claude/skills/<name>/SKILL.md` (incl. `synced/` from claude.ai and plugin folders), skills of installed plugins (`plugins/installed_plugins.json`; enabled per `enabledPlugins` in `settings.json`, else the plugin's `defaultEnabled`). The marketplace catalog in `plugins/marketplaces/` is not "installed" and is ignored. Honors `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_PLUGIN_CACHE_DIR`. | `~/.claude.json`: `mcpServers` (user scope) and `projects[<path>].mcpServers` (local scope) |
+| Antigravity | `~/.gemini/config/plugins/<plugin>/skills/`, and with `--all` the skills bundled in `~/.gemini/antigravity-cli/builtin/skills/` | `~/.gemini/config/mcp_config.json` |
+| Codex ⚠️ | `~/.agents/skills/`, `$CODEX_HOME/skills/` (older location), `/etc/codex/skills/`; `[[skills.config]] enabled = false` in `config.toml` | `[mcp_servers.<name>]` in `$CODEX_HOME/config.toml` |
+
+⚠️ **Codex support follows [OpenAI's public docs](https://learn.chatgpt.com/docs/build-skills) and has not been tested against a real Codex install.** If it misreads yours, please [open an issue](https://github.com/EliasOlie/agyh/issues/new/choose) or, even better, a PR with a fixture in `internal/agentkit/agentkit_test.go`.
+
+A skill's identity is a fingerprint of its folder (paths, executable bits and contents), so the same skill installed in two agents is recognized as one, and edited copies are flagged. Dependencies and caches a skill installs next to itself (`.venv`, `node_modules`, `ms-playwright`, `__pycache__`, VCS folders…) are not part of it. For MCP servers, only non-secret facts are kept: the command name (never its arguments), the URL's scheme and host (never its path or query) and the names of environment variables (never their values); header values are never read out.
 
 ## Design notes
 
