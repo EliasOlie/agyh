@@ -32,7 +32,7 @@ go test -race ./...
 - Keep PRs focused; one topic per PR. Squash merge is used, so the PR title becomes the commit message:
   use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `chore:`...).
 - Add or update tests for behaviour changes, and update the README when a command, flag or config key changes.
-- **Never weaken the safety model** without discussing it first: agent data is read-only, the bridge is
+- **Never weaken the safety model** without discussing it first: agent data is read-only (the one exception is the opt-in, ledger-tracked `agyh skills link`, which never touches files agyh did not create), the bridge is
   loopback-only, chat input never reaches a shell, and fatal commands stay blocked even in autonomous mode.
 - Don't include real session transcripts, tokens or personal data in tests or fixtures.
 

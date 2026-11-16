@@ -116,6 +116,8 @@ agyh -p pagamentos           # browser inside one project
 | `agyh bridge` | Run the daemon that connects hooks and chat. |
 | `agyh install-hooks claude\|agy` | Print the hook config to paste into your agent. |
 | `agyh skills` | Agent Skills installed in each agent, grouped by name, with differing copies flagged. `--agent`, `--all` (include skills bundled with the agents), `--json`. |
+| `agyh skills link <skill>… --to <agents>` | Copy a skill into other agents (e.g. from Antigravity into Claude Code and Codex), or `--all --from kit` after a restore. Opt-in, tracked, never overwrites your files. `--dry-run` previews. |
+| `agyh skills unlink <skill>…` / `agyh skills links` | Remove skills agyh installed (only its own, unedited copies) / list them. |
 | `agyh mcp` | MCP servers configured in each agent, grouped by name. Secrets are never shown. `--agent`, `--json`. |
 | `agyh doctor` | Check agents, index, channels and bridge. |
 
@@ -259,7 +261,7 @@ Snapshots are **per machine** (named by `sync.machine`, else the hostname): rest
   kit.json                  the snapshot, without secrets
 ```
 
-Archives are checked before anything is written (only regular files with clean relative paths, size limits, and the restored folder must match the recorded fingerprint). Installing the kit back into your agents is a separate, explicit step that comes in a later release. To sync conversations only, set `"kit": false` under `"sync"`.
+Archives are checked before anything is written (only regular files with clean relative paths, size limits, and the restored folder must match the recorded fingerprint). To put the restored skills back into your agents, run `agyh skills link --all --from kit` (see [Sharing skills between agents](#sharing-skills-between-agents)). To sync conversations only, set `"kit": false` under `"sync"`.
 
 ## Security model
 
@@ -271,7 +273,7 @@ agyh can approve shell commands, so it is built to fail closed:
 - Only the paired Telegram chat id, or your own WhatsApp "Message yourself" chat, can send commands or press buttons.
 - The bridge re-checks the policy itself, so even a misconfigured hook or autonomous session cannot get a fatal command approved.
 - The bot token never appears in errors or logs. Network errors from the Bot API are stripped of the URL.
-- Agent data is opened **read-only** (`mode=ro` for SQLite). agyh writes only its own files: the index, and the kit it restores under `~/.local/share/agyh/kit/`.
+- Agent data is opened **read-only** (`mode=ro` for SQLite). agyh writes its own files (the index, the kit under `~/.local/share/agyh/kit/`) and, **only if you enable `"manage_agents": true` and run `agyh skills link`**, skill folders inside agents' skill directories. It never touches a folder it did not create, nor one it created that you edited since; every install is recorded in `~/.local/share/agyh/links.json` and can be undone with `agyh skills unlink`.
 - The vault holds your **MCP tokens** (encrypted): whoever has the bucket *and* your passphrase has them too. Use a strong passphrase; `"kit": false` keeps them out of the vault.
 
 ## Configuration
@@ -346,13 +348,34 @@ Adding an agent means implementing one interface (`internal/source`): `Refs` (li
 
 ### Skills and MCP servers
 
-`agyh skills` and `agyh mcp` only read these files; nothing is ever written to an agent's configuration.
+`agyh skills` and `agyh mcp` only read these files. Writing skills into agents is a separate, opt-in command: see below.
 
 | Agent | Skills | MCP servers |
 |---|---|---|
 | Claude Code | `~/.claude/skills/<name>/SKILL.md` (incl. `synced/` from claude.ai and plugin folders), skills of installed plugins (`plugins/installed_plugins.json`; enabled per `enabledPlugins` in `settings.json`, else the plugin's `defaultEnabled`). The marketplace catalog in `plugins/marketplaces/` is not "installed" and is ignored. Honors `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_PLUGIN_CACHE_DIR`. | `~/.claude.json`: `mcpServers` (user scope) and `projects[<path>].mcpServers` (local scope) |
 | Antigravity | `~/.gemini/config/plugins/<plugin>/skills/`, and with `--all` the skills bundled in `~/.gemini/antigravity-cli/builtin/skills/` | `~/.gemini/config/mcp_config.json` |
 | Codex ⚠️ | `~/.agents/skills/`, `$CODEX_HOME/skills/` (older location), `/etc/codex/skills/`; `[[skills.config]] enabled = false` in `config.toml` | `[mcp_servers.<name>]` in `$CODEX_HOME/config.toml` |
+
+#### Sharing skills between agents
+
+Install a skill once, in any agent, and make it available to the others:
+
+```bash
+agyh skills link ponytail --to claude,codex --dry-run   # preview
+agyh skills link ponytail --to claude,codex             # copy it
+agyh skills link --all --from kit                       # after `agyh sync restore`: every skill back where it was
+agyh skills links                                       # what agyh installed, and whether you edited it since
+agyh skills unlink ponytail --agent codex               # undo
+```
+
+This is the only place agyh writes into an agent's files, so it is off until you add `"manage_agents": true` to `~/.config/agyh/config.json`, and it follows strict rules:
+
+- Skills are **copied** (not symlinked) into the agent's user skills folder: `~/.claude/skills/` for Claude Code, `~/.agents/skills/` for Codex. The copy is verified against the source's fingerprint.
+- A folder that **agyh did not create is never touched**, even if it has the same name; an identical one is reported and left alone.
+- A copy **you edited** after agyh installed it is yours: it is never updated or removed.
+- If a folder changes between planning and writing, the write is refused.
+- When one name has different versions in different agents, agyh asks you to pick one with `--from`.
+- Antigravity can be a source, not a target: it has no documented folder for user skills (PRs welcome).
 
 ⚠️ **Codex support follows [OpenAI's public docs](https://learn.chatgpt.com/docs/build-skills) and has not been tested against a real Codex install.** If it misreads yours, please [open an issue](https://github.com/EliasOlie/agyh/issues/new/choose) or, even better, a PR with a fixture in `internal/agentkit/agentkit_test.go`.
 

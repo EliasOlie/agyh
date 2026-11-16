@@ -64,6 +64,9 @@ type Config struct {
 	Runners map[string][]string `json:"runners"`
 	// Workspaces offered by /ws and accepted by /new (absolute paths).
 	Workspaces []string `json:"workspaces,omitempty"`
+	// ManageAgents allows agyh to install skills into agents' folders
+	// (agyh skills link/unlink). Off by default: agyh only reads agent files.
+	ManageAgents bool `json:"manage_agents,omitempty"`
 
 	path string
 }
