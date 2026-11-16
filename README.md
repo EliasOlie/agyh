@@ -228,7 +228,7 @@ agyh sync restore
 agyh sync migrate
 ```
 
-**Upgrading a vault from agyh ≤ 0.2.** Older versions derived every vault's key with PBKDF2 and one salt shared by all agyh users. The first `agyh sync` from this version adds the per-vault header; from then on every new write uses the new format, while older sessions stay readable. `agyh sync status` shows `legacy v1 blobs present` until you run `agyh sync migrate` once (safe to interrupt and re-run). **Upgrade agyh on every machine that shares the vault**: older versions cannot read the new format and will stop with a decryption error instead of overwriting anything.
+**Upgrading a vault from agyh ≤ 0.2.** Older versions derived every vault's key with PBKDF2 and one salt shared by all agyh users. The first `agyh sync` from this version adds the per-vault header; from then on every new write uses the new format, while older sessions stay readable. `agyh sync status` shows `legacy v1 blobs present` until you run `agyh sync migrate` once (safe to interrupt and re-run). **Upgrade agyh on every machine that shares the vault**: older versions cannot read the new format and will stop with a decryption error instead of overwriting anything. Step-by-step guide, troubleshooting and rollback: [MIGRATION.md](MIGRATION.md).
 
 ## Security model
 
