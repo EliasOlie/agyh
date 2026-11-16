@@ -30,6 +30,13 @@ type vault struct {
 	inflight, maxInflight atomic.Int32
 	puts                  atomic.Int32 // session blobs
 	allPuts               atomic.Int32 // every successful PUT
+
+	// glitchy mimics S3 servers seen in the wild: after an object is
+	// overwritten, its next read fails (HTTP 500) and the one after that is
+	// cut in half. Only then is the object served whole.
+	glitchy     bool
+	readsSince  map[string]int // key -> GETs since its last PUT
+	overwritten map[string]bool
 }
 
 func (v *vault) get(key string) []byte {
@@ -93,6 +100,13 @@ func (v *vault) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
+		if v.glitchy {
+			if v.readsSince == nil {
+				v.readsSince, v.overwritten = map[string]int{}, map[string]bool{}
+			}
+			_, had := v.objects[key]
+			v.overwritten[key], v.readsSince[key] = had, 0
+		}
 		v.objects[key] = body
 		v.allPuts.Add(1)
 		if strings.Contains(key, "/sessions/") {
@@ -103,6 +117,16 @@ func (v *vault) serve(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
+		}
+		if v.glitchy && v.overwritten[key] {
+			v.readsSince[key]++
+			switch v.readsSince[key] {
+			case 1:
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			case 2:
+				data = data[:len(data)/2]
+			}
 		}
 		_, _ = w.Write(data)
 	default:

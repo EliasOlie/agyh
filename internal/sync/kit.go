@@ -113,20 +113,12 @@ func (e *Engine) homes() []agentkit.Home {
 
 // getSealed fetches and decrypts one JSON object; found is false if missing.
 func (e *Engine) getSealed(ctx context.Context, key string, v any) (bool, error) {
-	data, err := e.s3.Get(ctx, key)
+	_, plain, err := e.getOpen(ctx, key)
 	if errors.Is(err, ErrObjectNotFound) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
-	}
-	keys, err := e.ready(ctx, false)
-	if err != nil {
-		return false, err
-	}
-	plain, err := keys.open(data)
-	if err != nil {
-		return false, fmt.Errorf("decrypt %s: %w", key, err)
+		return false, fmt.Errorf("%s: %w", key, err)
 	}
 	return true, json.Unmarshal(plain, v)
 }
@@ -180,7 +172,11 @@ func (e *Engine) KitMachines(ctx context.Context) ([]KitMachine, error) {
 // Skills bundled with an agent or shipped inside plugins are not copied:
 // the agent or the plugin brings them back.
 func (e *Engine) PushKit(ctx context.Context) (KitResult, error) {
-	if _, err := e.fetchManifest(ctx); err != nil { // proves the passphrase before any write
+	// Prove the passphrase before any write: the vault header's key check
+	// (or, on a v1 vault, decrypting its manifest while creating the header).
+	// Not by re-reading the manifest: a sync has usually just rewritten it,
+	// and some S3 servers serve a stale or cut-short copy right after.
+	if _, err := e.ready(ctx, true); err != nil {
 		return KitResult{}, err
 	}
 	res := KitResult{Machine: e.machine()}
@@ -321,8 +317,7 @@ func (e *Engine) RestoreKit(ctx context.Context, machine string) (KitResult, err
 		return res, err
 	}
 
-	keys, err := e.ready(ctx, false)
-	if err != nil {
+	if _, err := e.ready(ctx, false); err != nil { // check the vault key once, up front
 		return res, err
 	}
 	var (
@@ -343,11 +338,7 @@ func (e *Engine) RestoreKit(ctx context.Context, machine string) (KitResult, err
 	var restored atomic.Int64
 	err = each(ctx, len(snap.Skills), func(ctx context.Context, i int) error {
 		s := snap.Skills[i]
-		data, err := e.s3.Get(ctx, e.kitKey("skills", s.Digest+".blob"))
-		if err != nil {
-			return fmt.Errorf("skill %s: %w", s.Name, err)
-		}
-		archive, err := keys.open(data)
+		_, archive, err := e.getOpen(ctx, e.kitKey("skills", s.Digest+".blob"))
 		if err != nil {
 			return fmt.Errorf("skill %s: %w", s.Name, err)
 		}

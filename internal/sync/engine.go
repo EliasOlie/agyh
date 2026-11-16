@@ -91,18 +91,84 @@ func (e *Engine) headerKey() string {
 }
 
 func (e *Engine) fetchHeader(ctx context.Context) (*vaultHeader, error) {
-	data, err := e.s3.Get(ctx, e.headerKey())
-	if errors.Is(err, ErrObjectNotFound) {
-		return nil, nil
+	var lastErr error
+	for attempt := 0; attempt <= len(readRetryDelays); attempt++ {
+		if err := e.waitRetry(ctx, attempt); err != nil {
+			return nil, err
+		}
+		data, err := e.s3.Get(ctx, e.headerKey())
+		if errors.Is(err, ErrObjectNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			lastErr = fmt.Errorf("fetch vault header: %w", err)
+			continue
+		}
+		var h vaultHeader
+		if err := json.Unmarshal(data, &h); err != nil {
+			lastErr = fmt.Errorf("%w: %v", ErrVaultHeader, err) // possibly a cut-short read: try again
+			continue
+		}
+		return &h, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("fetch vault header: %w", err)
+	return nil, lastErr
+}
+
+// readRetryDelays are the waits between attempts at reading a vault object.
+// Some S3 servers briefly serve a stale or cut-short object right after it is
+// overwritten; a read that fails in transport, or fails authentication under
+// a key the vault header already verified, is retried. A wrong passphrase is
+// rejected by the header check first and never retried.
+var readRetryDelays = []time.Duration{time.Second, 3 * time.Second}
+
+func (e *Engine) waitRetry(ctx context.Context, attempt int) error {
+	if attempt == 0 {
+		return nil
 	}
-	var h vaultHeader
-	if err := json.Unmarshal(data, &h); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrVaultHeader, err)
+	select {
+	case <-time.After(readRetryDelays[attempt-1]):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return &h, nil
+}
+
+// getOpen reads and decrypts one vault object, retrying glitched reads (see
+// readRetryDelays). It returns the raw object and its plaintext.
+func (e *Engine) getOpen(ctx context.Context, key string) ([]byte, []byte, error) {
+	var lastErr error
+	for attempt := 0; attempt <= len(readRetryDelays); attempt++ {
+		if err := e.waitRetry(ctx, attempt); err != nil {
+			return nil, nil, err
+		}
+		data, err := e.s3.Get(ctx, key)
+		if errors.Is(err, ErrObjectNotFound) {
+			return nil, nil, err
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, err
+			}
+			lastErr = err
+			continue
+		}
+		keys, err := e.ready(ctx, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		plain, err := keys.open(data)
+		if err == nil {
+			return data, plain, nil
+		}
+		// The key is verified (header check), so failed authentication means
+		// the bytes are wrong, not the passphrase: read again.
+		if keys.hasHeader && errors.Is(err, ErrInvalidPassphrase) {
+			lastErr = err
+			continue
+		}
+		return nil, nil, err
+	}
+	return nil, nil, lastErr
 }
 
 // ready returns the vault keys. Reads work without a v2 header (v1 vaults);
@@ -185,19 +251,10 @@ func (e *Engine) sessionKey(agent, id string) string {
 }
 
 func (e *Engine) fetchManifest(ctx context.Context) (*Manifest, error) {
-	data, err := e.s3.Get(ctx, e.manifestKey())
+	_, decrypted, err := e.getOpen(ctx, e.manifestKey())
 	if errors.Is(err, ErrObjectNotFound) {
 		return NewManifest(), nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("fetch manifest: %w", err)
-	}
-
-	keys, err := e.ready(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	decrypted, err := keys.open(data)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt manifest: %w", err)
 	}
@@ -393,17 +450,9 @@ func (e *Engine) UploadSession(ctx context.Context, sess model.Session, projectM
 }
 
 func (e *Engine) fetchBundle(ctx context.Context, summary SessionSummary) (Bundle, error) {
-	data, err := e.s3.Get(ctx, e.sessionKey(summary.Agent, summary.ID))
+	_, decrypted, err := e.getOpen(ctx, e.sessionKey(summary.Agent, summary.ID))
 	if err != nil {
-		return Bundle{}, fmt.Errorf("get session blob %s: %w", summary.Key(), err)
-	}
-	keys, err := e.ready(ctx, false)
-	if err != nil {
-		return Bundle{}, err
-	}
-	decrypted, err := keys.open(data)
-	if err != nil {
-		return Bundle{}, fmt.Errorf("decrypt session blob %s: %w", summary.Key(), err)
+		return Bundle{}, fmt.Errorf("session blob %s: %w", summary.Key(), err)
 	}
 	var bundle Bundle
 	if err := json.Unmarshal(decrypted, &bundle); err != nil {
@@ -696,16 +745,12 @@ func (e *Engine) Migrate(ctx context.Context) (SyncResult, error) {
 	err = each(ctx, len(all), func(ctx context.Context, i int) error {
 		s := all[i]
 		key := e.sessionKey(s.Agent, s.ID)
-		data, err := e.s3.Get(ctx, key)
+		data, plain, err := e.getOpen(ctx, key)
 		if err != nil {
-			return fmt.Errorf("get %s: %w", s.Key(), err)
+			return fmt.Errorf("%s: %w", s.Key(), err)
 		}
 		if !bytes.HasPrefix(data, magicEncrypted) {
 			return nil // already v2 (or a plain-mode blob)
-		}
-		plain, err := keys.open(data)
-		if err != nil {
-			return fmt.Errorf("decrypt %s: %w", s.Key(), err)
 		}
 		sealed, err := keys.seal(plain)
 		if err != nil {
