@@ -42,7 +42,15 @@ type Sync struct {
 	Passphrase string `json:"passphrase,omitempty"` // for client-side zero-knowledge AES-256-GCM
 	Prefix     string `json:"prefix,omitempty"`     // default: "vault"
 	AutoSync   bool   `json:"auto_sync,omitempty"`  // sync automatically in bridge daemon
+	// Machine names this machine's kit snapshot (default: hostname).
+	Machine string `json:"machine,omitempty"`
+	// Kit backs up skills, plugin references and MCP servers with every
+	// sync. Default true; set false to sync conversations only.
+	Kit *bool `json:"kit,omitempty"`
 }
+
+// KitEnabled reports whether syncs include the agent kit (default: yes).
+func (s Sync) KitEnabled() bool { return s.Kit == nil || *s.Kit }
 
 type Config struct {
 	Bridge   Bridge   `json:"bridge"`
@@ -126,6 +134,9 @@ func LoadFrom(path string) (*Config, error) {
 	}
 	if v := os.Getenv("AGYH_SYNC_PASSPHRASE"); v != "" {
 		c.Sync.Passphrase = v
+	}
+	if v := os.Getenv("AGYH_SYNC_MACHINE"); v != "" {
+		c.Sync.Machine = v
 	}
 	if v := os.Getenv("AGYH_SYNC_PREFIX"); v != "" {
 		c.Sync.Prefix = v

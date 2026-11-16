@@ -7,6 +7,7 @@
 package agentkit
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -29,6 +30,31 @@ type Home interface {
 	Available() bool
 	Skills() ([]Skill, []error)
 	MCPServers() ([]MCPServer, []error)
+	// MCPConfig returns the full server entries, secrets included. It exists
+	// only to feed the encrypted vault: never print its result.
+	MCPConfig() ([]MCPEntry, []error)
+	// Plugins lists installed plugins as references (id, version, source):
+	// plugins are reinstalled through their agent, never copied.
+	Plugins() ([]PluginRef, []error)
+}
+
+// MCPEntry is one MCP server exactly as an agent stores it. Raw holds the
+// entry as JSON (Codex's TOML table is converted) and may contain secrets.
+type MCPEntry struct {
+	Agent   string          `json:"agent"`
+	Scope   string          `json:"scope"`
+	Project string          `json:"project,omitempty"`
+	Name    string          `json:"name"`
+	Format  string          `json:"format"` // source format: "json" or "toml"
+	Raw     json.RawMessage `json:"raw"`
+}
+
+// PluginRef identifies an installed plugin well enough to reinstall it.
+type PluginRef struct {
+	Agent   string `json:"agent"`
+	ID      string `json:"id"`
+	Version string `json:"version,omitempty"`
+	Source  string `json:"source,omitempty"` // where it came from, as the agent records it
 }
 
 // All returns every supported agent home, rooted at the user's home directory.
@@ -45,7 +71,8 @@ type Skill struct {
 	Scope       string `json:"scope"`
 	Plugin      string `json:"plugin,omitempty"` // plugin that ships it (ScopePlugin)
 	Path        string `json:"path"`             // the skill folder
-	Hash        string `json:"hash"`             // content fingerprint ("" if the folder was too large)
+	Hash        string `json:"hash"`             // short content fingerprint ("" if the folder was too large)
+	Digest      string `json:"digest,omitempty"` // full SHA-256 fingerprint
 	Disabled    bool   `json:"disabled,omitempty"`
 }
 

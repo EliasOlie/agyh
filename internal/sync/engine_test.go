@@ -55,6 +55,7 @@ func setupMockS3() (*httptest.Server, map[string][]byte) {
 
 func TestEngineE2ESync(t *testing.T) {
 	tmpDir := t.TempDir()
+	isolateAgents(t)
 	t.Setenv("XDG_DATA_HOME", tmpDir)
 
 	mockS3, _ := setupMockS3()

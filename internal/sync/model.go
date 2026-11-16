@@ -80,4 +80,7 @@ type StatusReport struct {
 	LastSynced     time.Time `json:"last_synced,omitempty"`
 	// LegacyEncryption: the vault still holds v1 blobs (shared-salt PBKDF2).
 	LegacyEncryption bool `json:"legacy_encryption"`
+	// Machine is this machine's kit name; KitMachines every kit snapshot in the vault.
+	Machine     string       `json:"machine"`
+	KitMachines []KitMachine `json:"kit_machines"`
 }

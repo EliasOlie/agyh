@@ -42,6 +42,10 @@ func fakeS3(t *testing.T) string {
 
 func TestSyncCommands(t *testing.T) {
 	home, _ := env(t)
+	t.Setenv("AGYH_SYNC_MACHINE", "work-laptop")
+	// One user skill and one MCP server with a secret: the kit to back up.
+	put(t, filepath.Join(home, ".claude", "skills", "ponytail", "SKILL.md"), "---\nname: ponytail\ndescription: Lazy mode.\n---\nbody\n")
+	put(t, filepath.Join(home, ".claude.json"), `{"mcpServers":{"github":{"command":"gh-mcp","env":{"GITHUB_TOKEN":"sk-KITSECRET"}}}}`)
 	endpoint := fakeS3(t)
 	writeConfig(t, map[string]any{"sync": map[string]any{"enabled": true, "endpoint": endpoint, "bucket": "vault-test",
 		"access_key": "ak", "secret_key": "sk", "passphrase": "a long test passphrase"}})
@@ -62,6 +66,9 @@ func TestSyncCommands(t *testing.T) {
 	if err := json.Unmarshal([]byte(mustRun(t, "sync", "status", "--json")), &st); err != nil || st.Local != 2 || st.ToUpload != 2 {
 		t.Fatalf("status --json: %+v %v", st, err)
 	}
+	if out := mustRun(t, "sync", "status"); !strings.Contains(out, "This machine:") || !strings.Contains(out, "work-laptop") || !strings.Contains(out, "none yet") {
+		t.Fatalf("status kit lines:\n%s", out)
+	}
 
 	out := mustRun(t, "sync")
 	for _, want := range []string{"✓ Synced with cloud vault (" + endpoint + "/vault-test)", "Uploaded:   2 sessions", "Total:      2 sessions in vault"} {
@@ -69,7 +76,10 @@ func TestSyncCommands(t *testing.T) {
 			t.Fatalf("sync is missing %q:\n%s", want, out)
 		}
 	}
-	if out := mustRun(t, "sync", "push"); out != "✓ Pushed 2 sessions to vault (2 total)\n" {
+	if !strings.Contains(out, `Kit:        1 skills (1 new), 1 MCP servers, 0 plugins, as "work-laptop"`) || strings.Contains(out, "sk-KITSECRET") {
+		t.Fatalf("sync kit line:\n%s", out)
+	}
+	if out := mustRun(t, "sync", "push"); out != "✓ Pushed 2 sessions to vault (2 total)\n  Kit:        1 skills (0 new), 1 MCP servers, 0 plugins, as \"work-laptop\"\n" {
 		t.Fatalf("sync push: %q", out)
 	}
 	if out := mustRun(t, "sync", "--push"); !strings.Contains(out, "✓ Pushed to cloud vault") {
@@ -96,13 +106,35 @@ func TestSyncCommands(t *testing.T) {
 	if out := mustRun(t, "sync"); strings.Contains(out, "legacy") {
 		t.Fatalf("no legacy hint expected on a v2 vault:\n%s", out)
 	}
+	if out := mustRun(t, "sync", "status"); !strings.Contains(out, "work-laptop: 1 skills, 1 MCP servers, 0 plugins") {
+		t.Fatalf("status after backup:\n%s", out)
+	}
 
-	// Fresh machine: no agent files, empty index. restore rebuilds it from the vault.
+	// Fresh machine, reinstalled under a new name: no agent files, empty index.
+	fresh := filepath.Join(home, "fresh-home")
+	t.Setenv("HOME", fresh)
+	t.Setenv("AGYH_SYNC_MACHINE", "new-laptop")
 	t.Setenv("AGYH_DB", filepath.Join(home, "fresh", "index.db"))
 	t.Setenv("AGYH_CLAUDE_DIR", filepath.Join(home, "no-claude"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "fresh-data"))
-	if out := mustRun(t, "sync", "restore"); out != "✓ Restored 2 sessions from cloud vault into local index\n" {
-		t.Fatalf("sync restore: %q", out)
+	// Its own name has no kit yet: sessions come back, the kit error names the machines.
+	out, err := run(t, "", "sync", "restore")
+	if err == nil || !strings.Contains(err.Error(), "machines in the vault: work-laptop") || !strings.Contains(out, "✓ Restored 2 sessions") {
+		t.Fatalf("restore without a kit for this name: %v\n%s", err, out)
+	}
+	out = mustRun(t, "sync", "restore", "--machine", "work-laptop")
+	kitDir := filepath.Join(home, "fresh-data", "agyh", "kit", "work-laptop")
+	if !strings.Contains(out, "✓ Restored the kit of work-laptop: 1 skills, 1 MCP servers, 0 plugins") || !strings.Contains(out, "not modified") {
+		t.Fatalf("sync restore --machine:\n%s", out)
+	}
+	if b, err := os.ReadFile(filepath.Join(kitDir, "claude", "skills", "ponytail", "SKILL.md")); err != nil || !strings.Contains(string(b), "Lazy mode") {
+		t.Fatalf("restored skill: %q %v", b, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(kitDir, "claude", "mcp.json")); err != nil || !strings.Contains(string(b), "sk-KITSECRET") {
+		t.Fatalf("restored MCP config must carry its secrets: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fresh, ".claude")); !os.IsNotExist(err) {
+		t.Fatalf("restore must not touch the agents: %v", err)
 	}
 	var hits []store.Hit
 	if err := json.Unmarshal([]byte(mustRun(t, "search", "idempotencia", "--json")), &hits); err != nil || len(hits) != 1 || hits[0].ID != pixID {

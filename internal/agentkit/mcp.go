@@ -90,3 +90,10 @@ func firstNonEmpty(vals ...string) string {
 	}
 	return ""
 }
+
+func errList(err error) []error {
+	if err == nil {
+		return nil
+	}
+	return []error{err}
+}

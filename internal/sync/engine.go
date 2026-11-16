@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/EliasOlie/agyh/internal/agentkit"
 	"github.com/EliasOlie/agyh/internal/config"
 	"github.com/EliasOlie/agyh/internal/model"
 	"github.com/EliasOlie/agyh/internal/source"
@@ -31,6 +32,8 @@ type Engine struct {
 	keyMu  sync.Mutex
 	keys   *vaultKeys
 	header *vaultHeader // nil until the vault has a v2 header
+
+	kitHomes func() []agentkit.Home // agents to snapshot; agentkit.All when nil (tests override)
 }
 
 type SyncResult struct {
@@ -40,6 +43,22 @@ type SyncResult struct {
 	Timestamp  time.Time `json:"timestamp"`
 	// LegacyBlobs: some sessions are still encrypted with the v1 key; run `agyh sync migrate`.
 	LegacyBlobs bool `json:"legacy_blobs,omitempty"`
+	// Kit is this machine's skills/plugins/MCP backup (nil when disabled).
+	Kit *KitResult `json:"kit,omitempty"`
+}
+
+// withKit backs up the kit after a successful session sync. Conversations
+// are already safe at this point, so a kit failure is reported, not hidden.
+func (e *Engine) withKit(ctx context.Context, res SyncResult) (SyncResult, error) {
+	if !e.cfg.KitEnabled() {
+		return res, nil
+	}
+	kit, err := e.PushKit(ctx)
+	res.Kit = &kit
+	if err != nil {
+		return res, fmt.Errorf("conversations synced, but the kit backup failed: %w", err)
+	}
+	return res, nil
 }
 
 func NewEngine(cfg config.Sync, st *store.Store) (*Engine, error) {
@@ -333,6 +352,10 @@ func (e *Engine) Status(ctx context.Context) (StatusReport, error) {
 	report.ToDownload = len(diff.ToDownload) + len(diff.ToMerge)
 	report.LastSynced = m.UpdatedAt
 	report.LegacyEncryption = e.legacy(m)
+	if report.KitMachines, err = e.KitMachines(ctx); err != nil {
+		return report, err
+	}
+	report.Machine = e.machine()
 	return report, nil
 }
 
@@ -574,7 +597,7 @@ func (e *Engine) Sync(ctx context.Context) (SyncResult, error) {
 	res.Total = len(m.Sessions)
 	res.Timestamp = time.Now()
 	res.LegacyBlobs = e.legacy(m)
-	return res, nil
+	return e.withKit(ctx, res)
 }
 
 // Push forces uploading all local sessions to the cloud vault.
@@ -601,7 +624,7 @@ func (e *Engine) Push(ctx context.Context) (SyncResult, error) {
 	res.Total = len(m.Sessions)
 	res.Timestamp = time.Now()
 	res.LegacyBlobs = e.legacy(m)
-	return res, nil
+	return e.withKit(ctx, res)
 }
 
 // Pull downloads all remote sessions that are missing or newer, and merges

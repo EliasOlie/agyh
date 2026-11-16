@@ -77,10 +77,10 @@ func readSkill(dir string) (Skill, error) {
 		name = filepath.Base(dir)
 	}
 	s := Skill{Name: name, Description: strings.Join(strings.Fields(fm.Description), " "), Path: dir}
-	s.Hash, err = hashDir(dir)
-	if err != nil {
+	if s.Digest, err = hashDir(dir); err != nil {
 		return s, fmt.Errorf("not fingerprinted: %w", err)
 	}
+	s.Hash = s.Digest[:12]
 	return s, nil
 }
 
@@ -120,14 +120,26 @@ var skipDirs = map[string]bool{
 	"ms-playwright": true,
 }
 
-// hashDir fingerprints a skill folder: relative paths, executable bits and
-// contents of every regular file outside skipDirs, in a stable order.
-func hashDir(root string) (string, error) {
+// skillFile is one file that belongs to a skill.
+type skillFile struct {
+	rel  string // slash-separated, relative to the skill folder
+	abs  string
+	exec bool
+	size int64
+}
+
+// skillFiles lists a skill's files: regular files outside skipDirs, sorted,
+// within maxSkillFiles/maxSkillBytes. Fingerprinting and packing both use it,
+// so a skill's identity and its backup always cover the same bytes.
+func skillFiles(root string) ([]skillFile, error) {
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	var files []string
+	var (
+		files []skillFile
+		total int64
+	)
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -135,40 +147,61 @@ func hashDir(root string) (string, error) {
 		if d.IsDir() && p != root && skipDirs[d.Name()] {
 			return filepath.SkipDir
 		}
-		if d.Type().IsRegular() {
-			files = append(files, p)
-			if len(files) > maxSkillFiles {
-				return fmt.Errorf("more than %d files", maxSkillFiles)
-			}
+		if !d.Type().IsRegular() {
+			return nil // symlinks, devices…: never part of a skill
 		}
+		st, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if len(files) >= maxSkillFiles {
+			return fmt.Errorf("more than %d files", maxSkillFiles)
+		}
+		if total += st.Size(); total > maxSkillBytes {
+			return fmt.Errorf("larger than %d MiB", maxSkillBytes>>20)
+		}
+		rel, _ := filepath.Rel(root, p)
+		files = append(files, skillFile{rel: filepath.ToSlash(rel), abs: p, exec: st.Mode().Perm()&0o111 != 0, size: st.Size()})
 		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(files, func(a, b skillFile) int { return strings.Compare(a.rel, b.rel) })
+	return files, nil
+}
+
+// digestWriter feeds one file into a skill fingerprint.
+func digestEntry(h io.Writer, rel string, exec bool, size int64) {
+	mode := 0
+	if exec {
+		mode = 0o111
+	}
+	fmt.Fprintf(h, "%s\x00%o\x00%d\x00", rel, mode, size)
+}
+
+// hashDir fingerprints a skill folder (full hex SHA-256): relative paths,
+// executable bits and contents of every file skillFiles returns.
+func hashDir(root string) (string, error) {
+	files, err := skillFiles(root)
+	if err != nil {
 		return "", err
 	}
-	slices.Sort(files)
 	h := sha256.New()
-	var total int64
-	for _, p := range files {
-		rel, _ := filepath.Rel(root, p)
-		st, err := os.Stat(p)
+	for _, f := range files {
+		digestEntry(h, f.rel, f.exec, f.size)
+		in, err := os.Open(f.abs)
 		if err != nil {
 			return "", err
 		}
-		total += st.Size()
-		if total > maxSkillBytes {
-			return "", fmt.Errorf("larger than %d MiB", maxSkillBytes>>20)
-		}
-		fmt.Fprintf(h, "%s\x00%o\x00%d\x00", filepath.ToSlash(rel), st.Mode().Perm()&0o111, st.Size())
-		f, err := os.Open(p)
+		n, err := io.Copy(h, in)
+		in.Close()
 		if err != nil {
 			return "", err
 		}
-		_, err = io.Copy(h, f)
-		f.Close()
-		if err != nil {
-			return "", err
+		if n != f.size {
+			return "", fmt.Errorf("%s changed while reading", f.rel)
 		}
 	}
-	return hex.EncodeToString(h.Sum(nil))[:12], nil
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

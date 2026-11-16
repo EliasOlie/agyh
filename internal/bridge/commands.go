@@ -189,8 +189,12 @@ func (b *Bridge) syncVault(_ context.Context, m Markup) string {
 			if err != nil {
 				return "❌ Sync failed: " + m.Escape(err.Error())
 			}
-			return fmt.Sprintf("☁️ Synced with vault: %d uploaded, %d downloaded (%d total)",
+			msg := fmt.Sprintf("☁️ Synced with vault: %d uploaded, %d downloaded (%d total)",
 				res.Uploaded, res.Downloaded, res.Total)
+			if res.Kit != nil {
+				msg += fmt.Sprintf("\n🧰 Kit: %d skills (%d new), %d MCP servers, %d plugins", res.Kit.Skills, res.Kit.NewSkills, res.Kit.MCP, res.Kit.Plugins)
+			}
+			return msg
 		})
 	}()
 	return "☁️ Sync started. I'll report here when it finishes. / Sincronização iniciada."
