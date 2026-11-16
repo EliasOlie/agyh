@@ -51,7 +51,9 @@ func (a *app) bridgeCmd() *cobra.Command {
 			defer st.Close()
 			log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 			b := bridge.New(bridge.Options{Config: cfg, Store: st, Policy: pol, Logger: log,
-				StatePath: filepath.Join(store.DataDir(), "bridge-state.json")})
+				StatePath:       filepath.Join(store.DataDir(), "bridge-state.json"),
+				LedgerPath:      ledgerPath(),
+				PropagationPath: filepath.Join(store.DataDir(), "propagation.json")})
 
 			if cfg.Telegram.Token != "" && cfg.Telegram.ChatID != 0 {
 				b.AddChannel(bridge.NewTelegram(bridge.NewTelegramClient(cfg.Telegram.Token), cfg.Telegram.ChatID))
@@ -84,6 +86,26 @@ func (a *app) bridgeCmd() *cobra.Command {
 					}
 				}
 			}()
+			// Offer new or changed skills to the agents that lack them (opt-in).
+			switch {
+			case cfg.AutoPropagate && !cfg.ManageAgents:
+				log.Warn(`"auto_propagate" needs "manage_agents": true; skill propagation is off`)
+			case cfg.AutoPropagate:
+				go func() {
+					t := time.NewTicker(reindex)
+					defer t.Stop()
+					for {
+						if err := b.PropagateSkills(ctx); err != nil && ctx.Err() == nil {
+							log.Warn("skill propagation failed", "err", err)
+						}
+						select {
+						case <-ctx.Done():
+							return
+						case <-t.C:
+						}
+					}
+				}()
+			}
 			return b.Serve(ctx)
 		},
 	}
