@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,8 +11,39 @@ import (
 
 	"github.com/EliasOlie/agyh/internal/bridge"
 	"github.com/EliasOlie/agyh/internal/config"
+	"github.com/EliasOlie/agyh/internal/store"
 	"github.com/EliasOlie/agyh/internal/sync"
 )
+
+// withVault loads the config, opens the index (re-synced first when reindex
+// is set) and hands a vault engine to fn. Every sync command goes through it.
+func (a *app) withVault(cmd *cobra.Command, reindex bool, fn func(e *sync.Engine, cfg *config.Config) error) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	var st *store.Store
+	if reindex {
+		st, err = a.openSynced(cmd.Context(), false)
+	} else {
+		st, err = a.open()
+	}
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	engine, err := sync.NewEngine(cfg.Sync, st)
+	if err != nil {
+		return err
+	}
+	return fn(engine, cfg)
+}
+
+func printJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
 
 func (a *app) syncCmd() *cobra.Command {
 	var (
@@ -32,214 +64,104 @@ Configure your endpoint, bucket and credentials in ~/.config/agyh/config.json
 or via AGYH_SYNC_* environment variables.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
-			st, err := a.openSynced(cmd.Context(), false)
-			if err != nil {
-				return err
-			}
-			defer st.Close()
-
-			engine, err := sync.NewEngine(cfg.Sync, st)
-			if err != nil {
-				return err
-			}
-
-			w := cmd.OutOrStdout()
-			ctx := cmd.Context()
-
-			if statusOnly {
-				report, err := engine.Status(ctx)
+			return a.withVault(cmd, true, func(engine *sync.Engine, cfg *config.Config) error {
+				w, ctx := cmd.OutOrStdout(), cmd.Context()
+				if statusOnly {
+					return runSyncStatus(cmd, engine, asJSON)
+				}
+				var (
+					res    sync.SyncResult
+					err    error
+					action = "Synced with cloud vault"
+				)
+				switch {
+				case pushOnly:
+					action = "Pushed to cloud vault"
+					res, err = engine.Push(ctx)
+				case pullOnly:
+					action = "Pulled from cloud vault"
+					res, err = engine.Pull(ctx)
+				default:
+					res, err = engine.Sync(ctx)
+				}
 				if err != nil {
 					return err
 				}
 				if asJSON {
-					enc := json.NewEncoder(w)
-					enc.SetIndent("", "  ")
-					return enc.Encode(report)
+					return printJSON(w, res)
 				}
-				return printSyncStatus(w, report)
-			}
-
-			var res sync.SyncResult
-			switch {
-			case pushOnly:
-				res, err = engine.Push(ctx)
-			case pullOnly:
-				res, err = engine.Pull(ctx)
-			default:
-				res, err = engine.Sync(ctx)
-			}
-			if err != nil {
-				return err
-			}
-
-			if asJSON {
-				enc := json.NewEncoder(w)
-				enc.SetIndent("", "  ")
-				return enc.Encode(res)
-			}
-
-			action := "Synced with cloud vault"
-			if pushOnly {
-				action = "Pushed to cloud vault"
-			} else if pullOnly {
-				action = "Pulled from cloud vault"
-			}
-
-			fmt.Fprintf(w, "✓ %s (%s/%s)\n", action, cfg.Sync.Endpoint, cfg.Sync.Bucket)
-			fmt.Fprintf(w, "  Uploaded:   %d sessions\n", res.Uploaded)
-			fmt.Fprintf(w, "  Downloaded: %d sessions\n", res.Downloaded)
-			fmt.Fprintf(w, "  Total:      %d sessions in vault\n", res.Total)
-			return nil
+				fmt.Fprintf(w, "✓ %s (%s/%s)\n", action, cfg.Sync.Endpoint, cfg.Sync.Bucket)
+				fmt.Fprintf(w, "  Uploaded:   %d sessions\n", res.Uploaded)
+				fmt.Fprintf(w, "  Downloaded: %d sessions\n", res.Downloaded)
+				fmt.Fprintf(w, "  Total:      %d sessions in vault\n", res.Total)
+				return nil
+			})
 		},
 	}
-
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	cmd.Flags().BoolVar(&statusOnly, "status", false, "show sync status without transferring data")
 	cmd.Flags().BoolVar(&pushOnly, "push", false, "only upload local sessions to vault")
 	cmd.Flags().BoolVar(&pullOnly, "pull", false, "only download remote sessions from vault")
 
-	// Subcommands
-	statusCmd := &cobra.Command{
-		Use:   "status",
-		Short: "Show differences between local store and cloud vault",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
-			st, err := a.openSynced(cmd.Context(), false)
-			if err != nil {
-				return err
-			}
-			defer st.Close()
-
-			engine, err := sync.NewEngine(cfg.Sync, st)
-			if err != nil {
-				return err
-			}
-			report, err := engine.Status(cmd.Context())
-			if err != nil {
-				return err
-			}
-			if asJSON {
-				enc := json.NewEncoder(cmd.OutOrStdout())
-				enc.SetIndent("", "  ")
-				return enc.Encode(report)
-			}
-			return printSyncStatus(cmd.OutOrStdout(), report)
-		},
-	}
-	statusCmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
-
-	pushCmd := &cobra.Command{
-		Use:   "push",
-		Short: "Force upload of all local sessions to cloud vault",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
-			st, err := a.openSynced(cmd.Context(), false)
-			if err != nil {
-				return err
-			}
-			defer st.Close()
-
-			engine, err := sync.NewEngine(cfg.Sync, st)
-			if err != nil {
-				return err
-			}
-			res, err := engine.Push(cmd.Context())
-			if err != nil {
-				return err
-			}
-			if asJSON {
-				enc := json.NewEncoder(cmd.OutOrStdout())
-				enc.SetIndent("", "  ")
-				return enc.Encode(res)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ Pushed %d sessions to vault (%d total)\n", res.Uploaded, res.Total)
-			return nil
-		},
-	}
-	pushCmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
-
-	pullCmd := &cobra.Command{
-		Use:   "pull",
-		Short: "Download any missing or updated sessions from cloud vault",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
-			st, err := a.openSynced(cmd.Context(), false)
-			if err != nil {
-				return err
-			}
-			defer st.Close()
-
-			engine, err := sync.NewEngine(cfg.Sync, st)
-			if err != nil {
-				return err
-			}
-			res, err := engine.Pull(cmd.Context())
-			if err != nil {
-				return err
-			}
-			if asJSON {
-				enc := json.NewEncoder(cmd.OutOrStdout())
-				enc.SetIndent("", "  ")
-				return enc.Encode(res)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ Pulled %d sessions from vault (%d total)\n", res.Downloaded, res.Total)
-			return nil
-		},
-	}
-	pullCmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
-
-	restoreCmd := &cobra.Command{
-		Use:   "restore",
-		Short: "Reconstruct local database by restoring all sessions from cloud vault",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
-			st, err := a.open()
-			if err != nil {
-				return err
-			}
-			defer st.Close()
-
-			engine, err := sync.NewEngine(cfg.Sync, st)
-			if err != nil {
-				return err
-			}
-			res, err := engine.Restore(cmd.Context())
-			if err != nil {
-				return err
-			}
-			if asJSON {
-				enc := json.NewEncoder(cmd.OutOrStdout())
-				enc.SetIndent("", "  ")
-				return enc.Encode(res)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "✓ Restored %d sessions from cloud vault into local index\n", res.Downloaded)
-			return nil
-		},
-	}
-	restoreCmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
-
-	cmd.AddCommand(statusCmd, pushCmd, pullCmd, restoreCmd)
+	cmd.AddCommand(
+		a.syncSub("status", "Show differences between local store and cloud vault", true,
+			func(cmd *cobra.Command, e *sync.Engine, asJSON bool) error { return runSyncStatus(cmd, e, asJSON) }),
+		a.syncSub("push", "Force upload of all local sessions to cloud vault", true,
+			transfer((*sync.Engine).Push, func(r sync.SyncResult) string {
+				return fmt.Sprintf("✓ Pushed %d sessions to vault (%d total)", r.Uploaded, r.Total)
+			})),
+		a.syncSub("pull", "Download any missing or updated sessions from cloud vault", true,
+			transfer((*sync.Engine).Pull, func(r sync.SyncResult) string {
+				return fmt.Sprintf("✓ Pulled %d sessions from vault (%d total)", r.Downloaded, r.Total)
+			})),
+		// restore rebuilds the index from the vault, so it must not index first.
+		a.syncSub("restore", "Reconstruct local database by restoring all sessions from cloud vault", false,
+			transfer((*sync.Engine).Restore, func(r sync.SyncResult) string {
+				return fmt.Sprintf("✓ Restored %d sessions from cloud vault into local index", r.Downloaded)
+			})),
+	)
 	return cmd
+}
+
+// syncSub builds one `agyh sync <name>` subcommand with its own --json flag.
+func (a *app) syncSub(name, short string, reindex bool, run func(cmd *cobra.Command, e *sync.Engine, asJSON bool) error) *cobra.Command {
+	var asJSON bool
+	c := &cobra.Command{
+		Use:   name,
+		Short: short,
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return a.withVault(cmd, reindex, func(e *sync.Engine, _ *config.Config) error { return run(cmd, e, asJSON) })
+		},
+	}
+	c.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	return c
+}
+
+// transfer adapts an engine operation to a subcommand: JSON or a one-line summary.
+func transfer(op func(*sync.Engine, context.Context) (sync.SyncResult, error), summary func(sync.SyncResult) string) func(*cobra.Command, *sync.Engine, bool) error {
+	return func(cmd *cobra.Command, e *sync.Engine, asJSON bool) error {
+		res, err := op(e, cmd.Context())
+		if err != nil {
+			return err
+		}
+		if asJSON {
+			return printJSON(cmd.OutOrStdout(), res)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), summary(res))
+		return nil
+	}
+}
+
+func runSyncStatus(cmd *cobra.Command, e *sync.Engine, asJSON bool) error {
+	report, err := e.Status(cmd.Context())
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return printJSON(cmd.OutOrStdout(), report)
+	}
+	return printSyncStatus(cmd.OutOrStdout(), report)
 }
 
 func printSyncStatus(w io.Writer, r sync.StatusReport) error {
