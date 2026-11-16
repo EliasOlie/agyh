@@ -16,12 +16,14 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/EliasOlie/agyh/internal/config"
 	"github.com/EliasOlie/agyh/internal/hook"
 	"github.com/EliasOlie/agyh/internal/policy"
 	"github.com/EliasOlie/agyh/internal/store"
+	vaultsync "github.com/EliasOlie/agyh/internal/sync"
 )
 
 // Markup formats text for one chat platform.
@@ -49,6 +51,10 @@ type Bridge struct {
 	approvals *Approvals
 	log       *slog.Logger
 	runner    Runner
+	// vaultSync runs one cloud-vault sync (replaceable in tests); syncing
+	// guards against overlapping /sync commands.
+	vaultSync func(context.Context) (vaultsync.SyncResult, error)
+	syncing   atomic.Bool
 
 	mu       sync.RWMutex
 	channels []Channel
@@ -73,8 +79,10 @@ func New(o Options) *Bridge {
 	if o.Policy == nil {
 		o.Policy = policy.MustDefault()
 	}
-	return &Bridge{cfg: o.Config, store: o.Store, policy: o.Policy, approvals: NewApprovals(o.StatePath),
+	b := &Bridge{cfg: o.Config, store: o.Store, policy: o.Policy, approvals: NewApprovals(o.StatePath),
 		log: o.Logger, runner: o.Runner}
+	b.vaultSync = b.runVaultSync
+	return b
 }
 
 func (b *Bridge) AddChannel(c Channel) {

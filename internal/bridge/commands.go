@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,34 +20,122 @@ import (
 	vaultsync "github.com/EliasOlie/agyh/internal/sync"
 )
 
-// Command describes one chat command, used for /help and Telegram's menu.
+// Command is one entry of Telegram's command menu.
 type Command struct {
 	Name, Args, Help string
 }
 
-var Commands = []Command{
-	{"chats", "[n]", "recent sessions / sessões recentes"},
-	{"sessoes", "[n]", "sessões recentes de todos os agentes"},
-	{"search", "<words>", "full-text search / busca em todo o histórico"},
-	{"buscar", "<termos>", "busca textual em todas as sessões"},
-	{"show", "<id>", "details and messages / detalhes e mensagens"},
-	{"ver", "<id>", "ver conversa e detalhes de uma sessão"},
-	{"projects", "", "list projects / listar projetos"},
-	{"projetos", "", "listar todos os seus projetos"},
-	{"project", "<name>", "sessions saved in a project"},
-	{"projeto", "<nome>", "ver sessões de um projeto"},
-	{"save", "<id> <project> [note]", "save session into a project"},
-	{"salvar", "<id> <projeto> [nota]", "salvar sessão em um projeto"},
-	{"new", "[agent] [@workspace] <prompt>", "start headless agent task"},
-	{"novo", "[agent] [@workspace] <prompt>", "iniciar tarefa de agente em background"},
-	{"ws", "", "workspaces available to /new"},
-	{"pending", "", "approvals waiting for you"},
-	{"pendentes", "", "aprovações aguardando resposta"},
-	{"auto", "[off <id>]", "sessions in autonomous mode"},
-	{"sync", "", "sync sessions with encrypted cloud vault"},
-	{"ajuda", "", "onboarding e guia completo de comandos"},
-	{"help", "", "command guide and onboarding"},
+// chatCommand is one chat command. names are advertised in /help and in
+// Telegram's menu, so they must be Telegram-safe ([a-z0-9_], max 32);
+// aliases are accepted but not advertised (accented spellings, synonyms).
+type chatCommand struct {
+	names   []string
+	aliases []string
+	args    string
+	help    string
+	run     func(ctx context.Context, b *Bridge, m Markup, rest string) string
 }
+
+// registry is the single source of truth for routing, /help and the Telegram
+// menu. It is built in init because handlers (help) read it back.
+var (
+	registry []chatCommand
+	byName   map[string]*chatCommand
+	// Commands is Telegram's menu, one entry per advertised name.
+	Commands []Command
+)
+
+func init() {
+	registry = []chatCommand{
+		{names: []string{"chats", "sessoes"}, aliases: []string{"history", "sessões", "historico", "histórico"},
+			args: "[n]", help: "recent sessions / sessões recentes", run: cmdChats},
+		{names: []string{"search", "buscar"}, aliases: []string{"pesquisar", "busca"},
+			args: "<words>", help: "full-text search / busca em todo o histórico", run: cmdSearch},
+		{names: []string{"show", "ver"}, aliases: []string{"exibir"},
+			args: "<id>", help: "details and messages / detalhes e mensagens", run: cmdShow},
+		{names: []string{"projects", "projetos"},
+			help: "list projects / listar projetos", run: cmdProjects},
+		{names: []string{"project", "projeto"},
+			args: "<name>", help: "sessions saved in a project / sessões de um projeto", run: cmdProject},
+		{names: []string{"save", "salvar"},
+			args: "<id> <project> [note]", help: "save a session into a project / salvar sessão em um projeto", run: cmdSave},
+		{names: []string{"new", "novo"}, aliases: []string{"run", "iniciar"},
+			args: "[agent] [@workspace] <prompt>", help: "start a headless agent task / iniciar tarefa em background", run: cmdNew},
+		{names: []string{"ws"}, aliases: []string{"cd", "workspaces"},
+			help: "workspaces available to /new / workspaces disponíveis", run: cmdWorkspaces},
+		{names: []string{"pending", "pendentes"}, aliases: []string{"fila"},
+			help: "approvals waiting for you / aprovações aguardando", run: cmdPending},
+		{names: []string{"auto"}, aliases: []string{"autonomo", "autônomo"},
+			args: "[off <id>]", help: "sessions in autonomous mode / sessões em modo autônomo", run: cmdAuto},
+		{names: []string{"sync", "sincronizar"},
+			help: "sync with the encrypted cloud vault / sincronizar com o vault", run: cmdSync},
+		{names: []string{"help", "ajuda"},
+			help: "command guide / guia de comandos", run: cmdHelp},
+		// Telegram sends /start on first contact; it has its own menu entry built in.
+		{aliases: []string{"start"}, run: cmdStart},
+	}
+	byName = map[string]*chatCommand{}
+	Commands = nil
+	for i := range registry {
+		c := &registry[i]
+		for _, n := range append(append([]string(nil), c.names...), c.aliases...) {
+			if _, dup := byName[n]; dup {
+				panic("bridge: duplicate chat command " + n)
+			}
+			byName[n] = c
+		}
+		for _, n := range c.names {
+			Commands = append(Commands, Command{Name: n, Args: c.args, Help: c.help})
+		}
+	}
+}
+
+func cmdStart(_ context.Context, b *Bridge, m Markup, _ string) string { return b.onboarding(m) }
+func cmdHelp(_ context.Context, b *Bridge, m Markup, _ string) string  { return b.help(m) }
+
+func cmdChats(ctx context.Context, b *Bridge, m Markup, rest string) string {
+	n := 8
+	if v, err := strconv.Atoi(rest); err == nil && v > 0 && v <= 30 {
+		n = v
+	}
+	hits, err := b.store.List(ctx, store.Filter{Limit: n})
+	return b.listReply(m, "Recent sessions / Sessões recentes", hits, err)
+}
+
+func cmdSearch(ctx context.Context, b *Bridge, m Markup, rest string) string {
+	if rest == "" {
+		return "Usage / Uso: /search <words> ou /buscar <termos>"
+	}
+	hits, err := b.store.Search(ctx, rest, store.Filter{Limit: 8})
+	return b.listReply(m, "Results for / Resultados para "+m.Bold(m.Escape(rest)), hits, err)
+}
+
+func cmdProject(ctx context.Context, b *Bridge, m Markup, rest string) string {
+	if rest == "" {
+		return "Usage / Uso: /project <name> ou /projeto <nome>"
+	}
+	hits, err := b.store.List(ctx, store.Filter{Project: rest, Limit: 20, IncludeSubs: true})
+	return b.listReply(m, "Project / Projeto "+m.Bold(m.Escape(rest)), hits, err)
+}
+
+func cmdShow(ctx context.Context, b *Bridge, m Markup, rest string) string {
+	return b.show(ctx, m, rest)
+}
+func cmdProjects(ctx context.Context, b *Bridge, m Markup, _ string) string {
+	return b.projects(ctx, m)
+}
+func cmdSave(ctx context.Context, b *Bridge, m Markup, rest string) string {
+	return b.save(ctx, m, rest)
+}
+func cmdNew(ctx context.Context, b *Bridge, m Markup, rest string) string {
+	return b.newSession(ctx, m, rest)
+}
+func cmdWorkspaces(_ context.Context, b *Bridge, m Markup, _ string) string { return b.workspaces(m) }
+func cmdPending(_ context.Context, b *Bridge, m Markup, _ string) string    { return b.pending(m) }
+func cmdAuto(ctx context.Context, b *Bridge, m Markup, rest string) string {
+	return b.auto(ctx, m, rest)
+}
+func cmdSync(ctx context.Context, b *Bridge, m Markup, _ string) string { return b.syncVault(ctx, m) }
 
 // HandleText processes one inbound chat message and replies on the same channel.
 func (b *Bridge) HandleText(ctx context.Context, ch Channel, text string) {
@@ -74,102 +164,45 @@ func (b *Bridge) Execute(ctx context.Context, m Markup, origin, text string) str
 	name, _, _ = strings.Cut(name, "@") // Telegram appends @botname in groups
 	rest = strings.TrimSpace(rest)
 
-	switch strings.ToLower(name) {
-	case "start":
-		return b.onboarding(m)
-	case "help", "ajuda":
-		return b.help(m)
-	case "chats", "history", "sessoes", "sessões", "historico", "histórico":
-		n := 8
-		if v, err := strconv.Atoi(rest); err == nil && v > 0 && v <= 30 {
-			n = v
-		}
-		hits, err := b.store.List(ctx, store.Filter{Limit: n})
-		return b.listReply(m, "Recent sessions / Sessões recentes", hits, err)
-	case "search", "buscar", "pesquisar", "busca":
-		if rest == "" {
-			return "Usage / Uso: /search <words> ou /buscar <termos>"
-		}
-		hits, err := b.store.Search(ctx, rest, store.Filter{Limit: 8})
-		return b.listReply(m, "Results for / Resultados para "+m.Bold(m.Escape(rest)), hits, err)
-	case "show", "ver", "exibir":
-		return b.show(ctx, m, rest)
-	case "projects", "projetos":
-		return b.projects(ctx, m)
-	case "project", "projeto":
-		if rest == "" {
-			return "Usage / Uso: /project <name> ou /projeto <nome>"
-		}
-		hits, err := b.store.List(ctx, store.Filter{Project: rest, Limit: 20, IncludeSubs: true})
-		return b.listReply(m, "Project / Projeto "+m.Bold(m.Escape(rest)), hits, err)
-	case "save", "salvar":
-		return b.save(ctx, m, rest)
-	case "new", "novo", "run", "iniciar":
-		return b.newSession(ctx, m, rest)
-	case "ws", "cd", "workspaces":
-		return b.workspaces(m)
-	case "pending", "pendentes", "fila":
-		return b.pending(m)
-	case "auto", "autonomo", "autônomo":
-		return b.auto(ctx, m, rest)
-	case "sync", "sincronizar":
-		return b.syncVault(ctx, m)
+	if c, ok := byName[strings.ToLower(name)]; ok {
+		return c.run(ctx, b, m, rest)
 	}
 	return "Unknown command /" + m.Escape(name) + ". Send /help or /ajuda."
 }
 
-func (b *Bridge) syncVault(ctx context.Context, m Markup) string {
+// syncVault runs in the background and reports on every channel. It must not
+// block: Telegram handles updates one at a time, so a long sync would hold
+// approval button taps until it finished. Only one sync runs at a time.
+func (b *Bridge) syncVault(_ context.Context, m Markup) string {
 	if !b.cfg.Sync.Enabled {
 		return "Cloud vault is not configured. Add \"sync\" to your config."
 	}
+	if !b.syncing.CompareAndSwap(false, true) {
+		return "☁️ A sync is already running. / Já existe uma sincronização em andamento."
+	}
+	go func() {
+		defer b.syncing.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		res, err := b.vaultSync(ctx)
+		b.Broadcast(context.Background(), func(m Markup) string {
+			if err != nil {
+				return "❌ Sync failed: " + m.Escape(err.Error())
+			}
+			return fmt.Sprintf("☁️ Synced with vault: %d uploaded, %d downloaded (%d total)",
+				res.Uploaded, res.Downloaded, res.Total)
+		})
+	}()
+	return "☁️ Sync started. I'll report here when it finishes. / Sincronização iniciada."
+}
+
+// runVaultSync is the default vaultSync: one bidirectional sync of the configured vault.
+func (b *Bridge) runVaultSync(ctx context.Context) (vaultsync.SyncResult, error) {
 	engine, err := vaultsync.NewEngine(b.cfg.Sync, b.store)
 	if err != nil {
-		return "Error: " + m.Escape(err.Error())
+		return vaultsync.SyncResult{}, err
 	}
-	res, err := engine.Sync(ctx)
-	if err != nil {
-		return "Sync failed: " + m.Escape(err.Error())
-	}
-	return fmt.Sprintf("☁️ Synced with vault: %d uploaded, %d downloaded (%d total)",
-		res.Uploaded, res.Downloaded, res.Total)
-}
-
-func (b *Bridge) onboarding(m Markup) string {
-	var sb strings.Builder
-	sb.WriteString("👋 " + m.Bold("Bem-vindo ao agyh! / Welcome to agyh!") + "\n\n")
-	sb.WriteString("O " + m.Bold("agyh") + " conecta seus coding agents (Antigravity, Claude Code, Codex) diretamente ao seu mensageiro, com histórico unificado e controle de permissões remoto.\n\n")
-	sb.WriteString(m.Bold("🔐 Como responder aprovações / How to approve:") + "\n")
-	sb.WriteString("Quando um agente precisar rodar um comando (ex: git push, migrations):\n")
-	sb.WriteString("• No Telegram: toque diretamente nos botões.\n")
-	sb.WriteString("• No WhatsApp ou por texto, responda:\n")
-	sb.WriteString("  - " + m.Code("s") + ", " + m.Code("sim") + " ou " + m.Code("y") + " ➔ Permitir / Allow\n")
-	sb.WriteString("  - " + m.Code("n") + ", " + m.Code("nao") + " ou " + m.Code("rejeitar") + " ➔ Negar / Deny\n")
-	sb.WriteString("  - " + m.Code("a") + ", " + m.Code("auto") + " ou " + m.Code("sempre") + " ➔ Sessão Autônoma ⚡\n\n")
-	sb.WriteString(m.Bold("📱 Comandos Principais / Main Commands:") + "\n")
-	sb.WriteString("• " + m.Code("/sessoes") + " ou " + m.Code("/chats") + " — Ver histórico recente\n")
-	sb.WriteString("• " + m.Code("/buscar <termo>") + " ou " + m.Code("/search <words>") + " — Busca textual instantânea\n")
-	sb.WriteString("• " + m.Code("/ver <id>") + " ou " + m.Code("/show <id>") + " — Detalhes e mensagens da conversa\n")
-	sb.WriteString("• " + m.Code("/novo [agent] <prompt>") + " ou " + m.Code("/new ...") + " — Iniciar tarefa em background\n")
-	sb.WriteString("• " + m.Code("/projetos") + " ou " + m.Code("/projects") + " — Listar seus projetos organizados\n")
-	sb.WriteString("• " + m.Code("/sync") + " — Sincronizar com o Cloud Vault criptografado\n")
-	sb.WriteString("• " + m.Code("/ajuda") + " ou " + m.Code("/help") + " — Ver todos os comandos\n\n")
-	sb.WriteString("💡 Dica: Envie " + m.Code("/sessoes") + " agora para ver suas sessões recentes!")
-	return sb.String()
-}
-
-func (b *Bridge) help(m Markup) string {
-	var sb strings.Builder
-	sb.WriteString(m.Bold("agyh") + " — your coding-agent sessions, from anywhere / suas sessões de IA em qualquer lugar.\n\n")
-	for _, c := range Commands {
-		line := "/" + c.Name
-		if c.Args != "" {
-			line += " " + c.Args
-		}
-		fmt.Fprintf(&sb, "%s — %s\n", m.Escape(line), m.Escape(c.Help))
-	}
-	sb.WriteString("\n" + m.Bold("Aprovações / Approvals:") + " Toque nos botões ou responda " + m.Code("s <id>") + " (sim/allow), " +
-		m.Code("n <id>") + " (não/deny) ou " + m.Code("a <id>") + " (autônomo/always).")
-	return sb.String()
+	return engine.Sync(ctx)
 }
 
 func (b *Bridge) listReply(m Markup, title string, hits []store.Hit, err error) string {
@@ -312,10 +345,12 @@ func (b *Bridge) defaultRunner() string {
 	if _, ok := b.cfg.Runners["claude"]; ok {
 		return "claude"
 	}
-	for k := range b.cfg.Runners {
-		return k
+	// Map order is random: pick the alphabetically first so /new is predictable.
+	names := slices.Sorted(maps.Keys(b.cfg.Runners))
+	if len(names) == 0 {
+		return ""
 	}
-	return ""
+	return names[0]
 }
 
 // workspace only accepts configured workspaces, so chat can't point a runner anywhere.
