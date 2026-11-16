@@ -78,4 +78,6 @@ type StatusReport struct {
 	ToUpload       int       `json:"to_upload"`
 	ToDownload     int       `json:"to_download"`
 	LastSynced     time.Time `json:"last_synced,omitempty"`
+	// LegacyEncryption: the vault still holds v1 blobs (shared-salt PBKDF2).
+	LegacyEncryption bool `json:"legacy_encryption"`
 }

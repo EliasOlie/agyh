@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,6 +27,10 @@ type Engine struct {
 	cfg config.Sync
 	st  *store.Store
 	s3  *S3Client
+
+	keyMu  sync.Mutex
+	keys   *vaultKeys
+	header *vaultHeader // nil until the vault has a v2 header
 }
 
 type SyncResult struct {
@@ -33,6 +38,8 @@ type SyncResult struct {
 	Downloaded int       `json:"downloaded"`
 	Total      int       `json:"total"`
 	Timestamp  time.Time `json:"timestamp"`
+	// LegacyBlobs: some sessions are still encrypted with the v1 key; run `agyh sync migrate`.
+	LegacyBlobs bool `json:"legacy_blobs,omitempty"`
 }
 
 func NewEngine(cfg config.Sync, st *store.Store) (*Engine, error) {
@@ -60,6 +67,100 @@ func (e *Engine) manifestKey() string {
 	return path.Join(e.cfg.Prefix, "manifest.blob")
 }
 
+func (e *Engine) headerKey() string {
+	return path.Join(e.cfg.Prefix, "vault.json")
+}
+
+func (e *Engine) fetchHeader(ctx context.Context) (*vaultHeader, error) {
+	data, err := e.s3.Get(ctx, e.headerKey())
+	if errors.Is(err, ErrObjectNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("fetch vault header: %w", err)
+	}
+	var h vaultHeader
+	if err := json.Unmarshal(data, &h); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrVaultHeader, err)
+	}
+	return &h, nil
+}
+
+// ready returns the vault keys. Reads work without a v2 header (v1 vaults);
+// when write is set, a missing header is created first, so every new blob is v2.
+func (e *Engine) ready(ctx context.Context, write bool) (*vaultKeys, error) {
+	e.keyMu.Lock()
+	defer e.keyMu.Unlock()
+	if e.keys != nil && (e.keys.hasHeader || !write) {
+		return e.keys, nil
+	}
+	h, err := e.fetchHeader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if h == nil && write {
+		if h, err = e.createHeader(ctx); err != nil {
+			return nil, err
+		}
+	}
+	k := &vaultKeys{passphrase: e.cfg.Passphrase}
+	if h != nil {
+		if k.v2, err = h.key(e.cfg.Passphrase); err != nil {
+			return nil, err
+		}
+		k.hasHeader = true
+	}
+	e.keys, e.header = k, h
+	return k, nil
+}
+
+// createHeader adds a v2 header with a fresh random salt. On a v1 vault the
+// passphrase must first open the existing manifest: a header written with a
+// wrong passphrase would lock everyone else out. Concurrent creators race on
+// a conditional write and everyone adopts whatever header is stored.
+func (e *Engine) createHeader(ctx context.Context) (*vaultHeader, error) {
+	legacy := false
+	data, err := e.s3.Get(ctx, e.manifestKey())
+	switch {
+	case err == nil:
+		if _, err := DecryptAndDecompress(data, e.cfg.Passphrase); err != nil {
+			return nil, fmt.Errorf("decrypt manifest: %w", err)
+		}
+		legacy = true
+	case !errors.Is(err, ErrObjectNotFound):
+		return nil, fmt.Errorf("fetch manifest: %w", err)
+	}
+	h, err := newVaultHeader(e.cfg.Passphrase, legacy)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.MarshalIndent(h, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := e.s3.PutIfAbsent(ctx, e.headerKey(), raw); err != nil {
+		return nil, fmt.Errorf("create vault header: %w", err)
+	}
+	stored, err := e.fetchHeader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if stored == nil {
+		return nil, errors.New("vault header missing right after creating it")
+	}
+	return stored, nil
+}
+
+// legacy reports whether v1-encrypted blobs may remain in the vault.
+func (e *Engine) legacy(m *Manifest) bool {
+	e.keyMu.Lock()
+	defer e.keyMu.Unlock()
+	if e.header == nil {
+		return len(m.Sessions) > 0
+	}
+	return e.header.LegacyBlobs
+}
+
 func (e *Engine) sessionKey(agent, id string) string {
 	return path.Join(e.cfg.Prefix, "sessions", agent, id+".blob")
 }
@@ -73,7 +174,11 @@ func (e *Engine) fetchManifest(ctx context.Context) (*Manifest, error) {
 		return nil, fmt.Errorf("fetch manifest: %w", err)
 	}
 
-	decrypted, err := DecryptAndDecompress(data, e.cfg.Passphrase)
+	keys, err := e.ready(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	decrypted, err := keys.open(data)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt manifest: %w", err)
 	}
@@ -101,7 +206,11 @@ func (e *Engine) saveManifest(ctx context.Context, m *Manifest) error {
 		return fmt.Errorf("encode manifest: %w", err)
 	}
 
-	encrypted, err := CompressAndEncrypt(raw, e.cfg.Passphrase)
+	keys, err := e.ready(ctx, true)
+	if err != nil {
+		return err
+	}
+	encrypted, err := keys.seal(raw)
 	if err != nil {
 		return fmt.Errorf("encrypt manifest: %w", err)
 	}
@@ -223,6 +332,7 @@ func (e *Engine) Status(ctx context.Context) (StatusReport, error) {
 	report.ToUpload = len(diff.ToUpload)
 	report.ToDownload = len(diff.ToDownload) + len(diff.ToMerge)
 	report.LastSynced = m.UpdatedAt
+	report.LegacyEncryption = e.legacy(m)
 	return report, nil
 }
 
@@ -247,7 +357,11 @@ func (e *Engine) UploadSession(ctx context.Context, sess model.Session, projectM
 		return fmt.Errorf("encode session bundle: %w", err)
 	}
 
-	encrypted, err := CompressAndEncrypt(raw, e.cfg.Passphrase)
+	keys, err := e.ready(ctx, true)
+	if err != nil {
+		return err
+	}
+	encrypted, err := keys.seal(raw)
 	if err != nil {
 		return fmt.Errorf("encrypt session bundle: %w", err)
 	}
@@ -260,7 +374,11 @@ func (e *Engine) fetchBundle(ctx context.Context, summary SessionSummary) (Bundl
 	if err != nil {
 		return Bundle{}, fmt.Errorf("get session blob %s: %w", summary.Key(), err)
 	}
-	decrypted, err := DecryptAndDecompress(data, e.cfg.Passphrase)
+	keys, err := e.ready(ctx, false)
+	if err != nil {
+		return Bundle{}, err
+	}
+	decrypted, err := keys.open(data)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("decrypt session blob %s: %w", summary.Key(), err)
 	}
@@ -455,6 +573,7 @@ func (e *Engine) Sync(ctx context.Context) (SyncResult, error) {
 	}
 	res.Total = len(m.Sessions)
 	res.Timestamp = time.Now()
+	res.LegacyBlobs = e.legacy(m)
 	return res, nil
 }
 
@@ -481,6 +600,7 @@ func (e *Engine) Push(ctx context.Context) (SyncResult, error) {
 	}
 	res.Total = len(m.Sessions)
 	res.Timestamp = time.Now()
+	res.LegacyBlobs = e.legacy(m)
 	return res, nil
 }
 
@@ -528,6 +648,74 @@ func (e *Engine) Restore(ctx context.Context) (SyncResult, error) {
 		return nil
 	}); err != nil {
 		return res, err
+	}
+	res.Total = len(m.Sessions)
+	res.Timestamp = time.Now()
+	return res, nil
+}
+
+// Migrate re-encrypts every v1 session blob with the vault's own Argon2id key,
+// rewrites the manifest as v2 and clears the header's legacy flag. It is
+// idempotent and safe to interrupt: v1 and v2 blobs stay readable side by
+// side, and a re-run only rewrites what is still v1. Uploaded counts the
+// sessions rewritten.
+func (e *Engine) Migrate(ctx context.Context) (SyncResult, error) {
+	m, err := e.fetchManifest(ctx) // proves the passphrase before anything is written
+	if err != nil {
+		return SyncResult{}, err
+	}
+	keys, err := e.ready(ctx, true)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	all := slices.Collect(maps.Values(m.Sessions))
+	var rewritten atomic.Int64
+	err = each(ctx, len(all), func(ctx context.Context, i int) error {
+		s := all[i]
+		key := e.sessionKey(s.Agent, s.ID)
+		data, err := e.s3.Get(ctx, key)
+		if err != nil {
+			return fmt.Errorf("get %s: %w", s.Key(), err)
+		}
+		if !bytes.HasPrefix(data, magicEncrypted) {
+			return nil // already v2 (or a plain-mode blob)
+		}
+		plain, err := keys.open(data)
+		if err != nil {
+			return fmt.Errorf("decrypt %s: %w", s.Key(), err)
+		}
+		sealed, err := keys.seal(plain)
+		if err != nil {
+			return err
+		}
+		if err := e.s3.Put(ctx, key, sealed); err != nil {
+			return fmt.Errorf("rewrite %s: %w", s.Key(), err)
+		}
+		rewritten.Add(1)
+		return nil
+	})
+	res := SyncResult{Uploaded: int(rewritten.Load())}
+	if err != nil {
+		return res, err
+	}
+	if err := e.saveManifest(ctx, m); err != nil {
+		return res, err
+	}
+	e.keyMu.Lock()
+	h := *e.header
+	e.keyMu.Unlock()
+	if h.LegacyBlobs {
+		h.LegacyBlobs = false
+		raw, err := json.MarshalIndent(&h, "", "  ")
+		if err != nil {
+			return res, err
+		}
+		if err := e.s3.Put(ctx, e.headerKey(), raw); err != nil {
+			return res, fmt.Errorf("update vault header: %w", err)
+		}
+		e.keyMu.Lock()
+		e.header.LegacyBlobs = false
+		e.keyMu.Unlock()
 	}
 	res.Total = len(m.Sessions)
 	res.Timestamp = time.Now()

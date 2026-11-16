@@ -36,7 +36,7 @@ Agent CLIs keep history per tool and per folder. After a few weeks you have hund
 | **Projects** | Save sessions from any agent into named projects, with notes. Filter the browser, the CLI and the chat by project. |
 | **Resume anywhere** | `agyh resume <id>` reopens the session in its agent **and** its original workspace. |
 | **Interactive TUI** | Live search as you type, read whole transcripts, resume, save to project, copy the id (OSC 52). |
-| **Encrypted Cloud Vault** | Synchronize sessions & projects across multiple machines via S3-compatible storage (Cloudflare R2, MinIO, AWS S3, any self-hosted S3). Zero-knowledge client-side encryption (AES-256-GCM + PBKDF2). Instant disaster recovery (`agyh sync restore`). |
+| **Encrypted Cloud Vault** | Synchronize sessions & projects across multiple machines via S3-compatible storage (Cloudflare R2, MinIO, AWS S3, any self-hosted S3). Zero-knowledge client-side encryption (AES-256-GCM, Argon2id key with a per-vault random salt). Instant disaster recovery (`agyh sync restore`). |
 | **Remote approvals** | Agent hooks send risky commands to Telegram (inline buttons) and/or WhatsApp; the first answer wins, phone or terminal. |
 | **Autonomous mode** | One tap allows the rest of a session, while fatal commands stay blocked. |
 | **Drive agents from chat** | `/chats`, `/search`, `/show`, `/save`, `/projects`, `/new` (start a headless session in a whitelisted workspace). |
@@ -110,7 +110,7 @@ agyh -p pagamentos           # browser inside one project
 | `agyh resume [<id> \| --last]` | Exec the agent in the session's workspace. `--print` shows the command instead. |
 | `agyh index [--full]` | Sync the index (normally automatic). |
 | `agyh project new\|ls\|add\|rm\|show\|rename\|delete` | Manage projects. |
-| `agyh sync [status\|push\|pull\|restore]` | Synchronize or restore sessions with encrypted cloud vault. |
+| `agyh sync [status\|push\|pull\|restore\|migrate]` | Synchronize or restore sessions with encrypted cloud vault; `migrate` re-encrypts sessions written by agyh ≤ 0.2 with the vault's own key. |
 | `agyh connect telegram\|whatsapp` | Pair a chat channel. |
 | `agyh bridge` | Run the daemon that connects hooks and chat. |
 | `agyh install-hooks claude\|agy` | Print the hook config to paste into your agent. |
@@ -206,7 +206,7 @@ Add your own patterns in the config: `"policy": {"safe": ["^make\\s+test(\\s|$)"
 
 Agent history is normally trapped on a single machine and lost whenever you format, switch laptops or work on a remote server. `agyh` includes a client-side encrypted cloud sync engine that turns your history into a persistent, multi-machine AI memory bank:
 
-- **Zero-knowledge encryption**: Every session transcript and project association is compressed with `gzip` and encrypted client-side with **AES-256-GCM** using a key derived via **PBKDF2** (100,000 rounds of SHA-256). The storage provider only ever sees ciphertext. Because anyone who obtains the bucket contents can attempt offline guesses, **use a long, random passphrase** (e.g. a 6+ word diceware phrase or a password-manager-generated secret) and keep it out of your shell history.
+- **Zero-knowledge encryption**: Every session transcript and project association is compressed with `gzip` and encrypted client-side with **AES-256-GCM**. The key is derived from your passphrase with **Argon2id** (memory-hard: t=3, 64 MiB) and a **random salt unique to each vault**, so a guess computed against one vault is useless against another. The salt and KDF parameters live in a small plaintext `vault.json` (they are not secret), together with a key check that makes a wrong passphrase, or a header someone altered, fail before anything is written; parameters below a safe minimum are refused. The storage provider only ever sees ciphertext. Because anyone who obtains the bucket contents can attempt offline guesses, **use a long, random passphrase** (e.g. a 6+ word diceware phrase or a password-manager-generated secret) and keep it out of your shell history.
 - **Self-hosted & S3-compatible**: Works with Cloudflare R2, MinIO, AWS S3 or any other S3-compatible store. No SDK dependencies; pure Go implementation over AWS SigV4.
 - **Local-first with Archive fallback**: Full-text search and transcript browsing stay local (0 ms latency via SQLite FTS5). If you open a session synced from another machine where local agent files don't exist, `agyh` transparently loads the transcript from its local encrypted archive cache.
 
@@ -223,7 +223,12 @@ agyh sync pull
 
 # Fresh machine or disaster recovery? Reconstruct your entire history from zero:
 agyh sync restore
+
+# Vault created by agyh <= 0.2? Re-encrypt its sessions with the vault's own key:
+agyh sync migrate
 ```
+
+**Upgrading a vault from agyh ≤ 0.2.** Older versions derived every vault's key with PBKDF2 and one salt shared by all agyh users. The first `agyh sync` from this version adds the per-vault header; from then on every new write uses the new format, while older sessions stay readable. `agyh sync status` shows `legacy v1 blobs present` until you run `agyh sync migrate` once (safe to interrupt and re-run). **Upgrade agyh on every machine that shares the vault**: older versions cannot read the new format and will stop with a decryption error instead of overwriting anything.
 
 ## Security model
 

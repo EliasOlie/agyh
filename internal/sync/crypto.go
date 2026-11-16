@@ -1,3 +1,6 @@
+// Vault format v1 (legacy): PBKDF2 with a salt shared by every agyh user.
+// New writes use v2 (see vaultkey.go); v1 is kept to read existing vaults
+// and for `agyh sync migrate`.
 package sync
 
 import (
@@ -41,22 +44,14 @@ func deriveKey(passphrase string) []byte {
 	return k
 }
 
-// CompressAndEncrypt compresses payload with gzip and, if passphrase is not empty,
-// encrypts it using AES-256-GCM with a PBKDF2-derived key.
+// CompressAndEncrypt writes a v1 blob: gzip, then (if passphrase is not empty)
+// AES-256-GCM with the legacy PBKDF2 key. Deprecated for new data: the engine
+// writes v2 blobs; this remains for compatibility and tests.
 func CompressAndEncrypt(data []byte, passphrase string) ([]byte, error) {
-	var gzBuf bytes.Buffer
-	gw, err := gzip.NewWriterLevel(&gzBuf, gzip.BestCompression)
+	compressed, err := gzipBytes(data)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := gw.Write(data); err != nil {
-		_ = gw.Close()
-		return nil, err
-	}
-	if err := gw.Close(); err != nil {
-		return nil, err
-	}
-	compressed := gzBuf.Bytes()
 
 	if passphrase == "" {
 		out := make([]byte, len(magicPlain)+len(compressed))
@@ -130,12 +125,31 @@ func DecryptAndDecompress(blob []byte, passphrase string) ([]byte, error) {
 		compressed = blob
 	}
 
+	return gunzipBytes(compressed)
+}
+
+func gzipBytes(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	gw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := gw.Write(data); err != nil {
+		_ = gw.Close()
+		return nil, err
+	}
+	if err := gw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func gunzipBytes(compressed []byte) ([]byte, error) {
 	gr, err := gzip.NewReader(bytes.NewReader(compressed))
 	if err != nil {
 		return nil, fmt.Errorf("decompress gzip: %w", err)
 	}
 	defer gr.Close()
-
 	out, err := io.ReadAll(gr)
 	if err != nil {
 		return nil, fmt.Errorf("read decompressed data: %w", err)
