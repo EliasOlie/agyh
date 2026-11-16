@@ -1,6 +1,7 @@
 package agentkit
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -147,6 +148,40 @@ func (c *Codex) MCPServers() ([]MCPServer, []error) {
 	}
 	return out, nil
 }
+
+// MCPConfig converts each [mcp_servers.<name>] table to JSON, values included.
+func (c *Codex) MCPConfig() ([]MCPEntry, []error) {
+	path := filepath.Join(c.home, "config.toml")
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, errList(err)
+	}
+	var doc struct {
+		MCPServers map[string]map[string]any `toml:"mcp_servers"`
+	}
+	if err := toml.Unmarshal(raw, &doc); err != nil {
+		return nil, errList(fmt.Errorf("%s: %w", shortHome(path), err))
+	}
+	var (
+		out  []MCPEntry
+		errs []error
+	)
+	for name, table := range doc.MCPServers {
+		j, err := json.Marshal(table)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: mcp server %q: %w", shortHome(path), name, err))
+			continue
+		}
+		out = append(out, MCPEntry{Agent: "codex", Scope: ScopeUser, Name: name, Format: "toml", Raw: j})
+	}
+	return out, errs
+}
+
+// Plugins: Codex's on-disk plugin registry is not documented; none are listed.
+func (c *Codex) Plugins() ([]PluginRef, []error) { return nil, nil }
 
 func setOf(vals []string) map[string]bool {
 	m := make(map[string]bool, len(vals))

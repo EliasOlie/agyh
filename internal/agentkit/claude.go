@@ -81,7 +81,7 @@ func (c *Claude) Skills() ([]Skill, []error) {
 	return out, errs
 }
 
-type installedPlugin struct{ id, path string }
+type installedPlugin struct{ id, path, version string }
 
 // installedPlugins reads plugins/installed_plugins.json. Only the field names
 // (installPath, scope, version) are documented, not the file's shape, so any
@@ -110,7 +110,8 @@ func (c *Claude) installedPlugins(errs *[]error) []installedPlugin {
 				if id == "" {
 					id = filepath.Base(p)
 				}
-				out = append(out, installedPlugin{id: id, path: p})
+				v, _ := t["version"].(string)
+				out = append(out, installedPlugin{id: id, path: p, version: v})
 				return
 			}
 			for k, child := range t {
@@ -171,22 +172,90 @@ func pluginSkills(dir, agent, plugin string) ([]Skill, []error) {
 	return s, errs
 }
 
-func (c *Claude) MCPServers() ([]MCPServer, []error) {
+// claudeMCP is the part of .claude.json that holds MCP servers.
+type claudeMCP struct {
+	MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	Projects   map[string]struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
+	} `json:"projects"`
+}
+
+func (c *Claude) readMCP() (*claudeMCP, error) {
 	raw, err := os.ReadFile(c.cfgJSON)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, []error{err}
+		return nil, err
 	}
-	var doc struct {
-		MCPServers map[string]json.RawMessage `json:"mcpServers"`
-		Projects   map[string]struct {
-			MCPServers map[string]json.RawMessage `json:"mcpServers"`
-		} `json:"projects"`
-	}
+	var doc claudeMCP
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, []error{fmt.Errorf("%s: %w", shortHome(c.cfgJSON), err)}
+		return nil, fmt.Errorf("%s: %w", shortHome(c.cfgJSON), err)
+	}
+	return &doc, nil
+}
+
+func (c *Claude) MCPConfig() ([]MCPEntry, []error) {
+	doc, err := c.readMCP()
+	if err != nil || doc == nil {
+		return nil, errList(err)
+	}
+	var out []MCPEntry
+	for name, raw := range doc.MCPServers {
+		out = append(out, MCPEntry{Agent: "claude", Scope: ScopeUser, Name: name, Format: "json", Raw: raw})
+	}
+	for project, p := range doc.Projects {
+		for name, raw := range p.MCPServers {
+			out = append(out, MCPEntry{Agent: "claude", Scope: ScopeLocal, Project: project, Name: name, Format: "json", Raw: raw})
+		}
+	}
+	return out, nil
+}
+
+func (c *Claude) Plugins() ([]PluginRef, []error) {
+	var errs []error
+	sources := c.marketplaceSources()
+	var out []PluginRef
+	for _, p := range c.installedPlugins(&errs) {
+		ref := PluginRef{Agent: "claude", ID: p.id, Version: p.version}
+		if _, mkt, ok := strings.Cut(p.id, "@"); ok {
+			ref.Source = sources[mkt]
+		}
+		out = append(out, ref)
+	}
+	return out, errs
+}
+
+// marketplaceSources maps marketplace name -> where it comes from, from
+// plugins/known_marketplaces.json ({"<name>": {"source": {...}}}).
+func (c *Claude) marketplaceSources() map[string]string {
+	raw, err := os.ReadFile(filepath.Join(c.plugins, "known_marketplaces.json"))
+	if err != nil {
+		return nil
+	}
+	var doc map[string]struct {
+		Source map[string]any `json:"source"`
+	}
+	if json.Unmarshal(raw, &doc) != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for name, m := range doc {
+		kind, _ := m.Source["source"].(string)
+		for _, k := range []string{"repo", "url", "path"} {
+			if v, ok := m.Source[k].(string); ok && v != "" {
+				out[name] = strings.TrimPrefix(kind+":", ":") + v
+				break
+			}
+		}
+	}
+	return out
+}
+
+func (c *Claude) MCPServers() ([]MCPServer, []error) {
+	doc, err := c.readMCP()
+	if err != nil || doc == nil {
+		return nil, errList(err)
 	}
 	var (
 		out  []MCPServer

@@ -210,6 +210,7 @@ Add your own patterns in the config: `"policy": {"safe": ["^make\\s+test(\\s|$)"
 Agent history is normally trapped on a single machine and lost whenever you format, switch laptops or work on a remote server. `agyh` includes a client-side encrypted cloud sync engine that turns your history into a persistent, multi-machine AI memory bank:
 
 - **Zero-knowledge encryption**: Every session transcript and project association is compressed with `gzip` and encrypted client-side with **AES-256-GCM**. The key is derived from your passphrase with **Argon2id** (memory-hard: t=3, 64 MiB) and a **random salt unique to each vault**, so a guess computed against one vault is useless against another. The salt and KDF parameters live in a small plaintext `vault.json` (they are not secret), together with a key check that makes a wrong passphrase, or a header someone altered, fail before anything is written; parameters below a safe minimum are refused. The storage provider only ever sees ciphertext. Because anyone who obtains the bucket contents can attempt offline guesses, **use a long, random passphrase** (e.g. a 6+ word diceware phrase or a password-manager-generated secret) and keep it out of your shell history.
+- **Your agent kit comes along**: every sync also backs up this machine's **kit**: the skills you installed in each agent (their files, deduplicated by content), the plugins you use (as references, so each agent reinstalls them) and your MCP servers **with their tokens**, all encrypted like everything else. See [Agent kit](#agent-kit).
 - **Self-hosted & S3-compatible**: Works with Cloudflare R2, MinIO, AWS S3 or any other S3-compatible store. No SDK dependencies; pure Go implementation over AWS SigV4.
 - **Local-first with Archive fallback**: Full-text search and transcript browsing stay local (0 ms latency via SQLite FTS5). If you open a session synced from another machine where local agent files don't exist, `agyh` transparently loads the transcript from its local encrypted archive cache.
 
@@ -224,14 +225,41 @@ agyh sync
 agyh sync push
 agyh sync pull
 
-# Fresh machine or disaster recovery? Reconstruct your entire history from zero:
+# Fresh machine or disaster recovery? Reconstruct your entire history from zero,
+# plus this machine's kit (skills, plugins, MCP servers):
 agyh sync restore
+agyh sync restore --machine old-laptop   # reinstalled under a new name? pick the old kit
 
 # Vault created by agyh <= 0.2? Re-encrypt its sessions with the vault's own key:
 agyh sync migrate
 ```
 
 **Upgrading a vault from agyh ≤ 0.2.** Older versions derived every vault's key with PBKDF2 and one salt shared by all agyh users. The first `agyh sync` from this version adds the per-vault header; from then on every new write uses the new format, while older sessions stay readable. `agyh sync status` shows `legacy v1 blobs present` until you run `agyh sync migrate` once (safe to interrupt and re-run). **Upgrade agyh on every machine that shares the vault**: older versions cannot read the new format and will stop with a decryption error instead of overwriting anything. Step-by-step guide, troubleshooting and rollback: [MIGRATION.md](MIGRATION.md).
+
+### Agent kit
+
+A machine's **kit** is its agent environment, saved with every `agyh sync` / `agyh sync push`:
+
+| What | How it is stored |
+|---|---|
+| Skills you installed (`~/.claude/skills`, Codex's `~/.agents/skills`, …) | Each skill folder, as an encrypted archive named by its content fingerprint: the same skill on five machines is stored once, and only new or changed skills are uploaded. Dependencies a skill installs next to itself (`.venv`, `node_modules`, Playwright browsers…) are left out: a 1.4 GB skill folder backs up as 1.4 MB. |
+| Plugins | References only (id, version, where it came from). Plugins are reinstalled through their agent, never copied. Skills shipped inside plugins come back with the plugin. |
+| MCP servers | Every server entry exactly as each agent stores it, **tokens included**, encrypted with the vault key. |
+
+Snapshots are **per machine** (named by `sync.machine`, else the hostname): restoring brings back exactly the environment that machine had. `agyh sync status` lists every machine's snapshot.
+
+`agyh sync restore` writes the kit into agyh's own data directory, **never into an agent's configuration**:
+
+```
+~/.local/share/agyh/kit/<machine>/
+  claude/skills/<name>/     each skill, verified against its fingerprint
+  claude/mcp.json           MCP servers with their secrets (mode 0600)
+  agy/…  codex/…
+  plugins.json              plugins to reinstall
+  kit.json                  the snapshot, without secrets
+```
+
+Archives are checked before anything is written (only regular files with clean relative paths, size limits, and the restored folder must match the recorded fingerprint). Installing the kit back into your agents is a separate, explicit step that comes in a later release. To sync conversations only, set `"kit": false` under `"sync"`.
 
 ## Security model
 
@@ -243,7 +271,8 @@ agyh can approve shell commands, so it is built to fail closed:
 - Only the paired Telegram chat id, or your own WhatsApp "Message yourself" chat, can send commands or press buttons.
 - The bridge re-checks the policy itself, so even a misconfigured hook or autonomous session cannot get a fatal command approved.
 - The bot token never appears in errors or logs. Network errors from the Bot API are stripped of the URL.
-- Agent data is opened **read-only** (`mode=ro` for SQLite). The only file agyh writes is its own index.
+- Agent data is opened **read-only** (`mode=ro` for SQLite). agyh writes only its own files: the index, and the kit it restores under `~/.local/share/agyh/kit/`.
+- The vault holds your **MCP tokens** (encrypted): whoever has the bucket *and* your passphrase has them too. Use a strong passphrase; `"kit": false` keeps them out of the vault.
 
 ## Configuration
 
@@ -266,7 +295,9 @@ agyh can approve shell commands, so it is built to fail closed:
     "access_key": "AKIA...",
     "secret_key": "...",
     "passphrase": "your-master-encryption-key",
-    "prefix": "vault"
+    "prefix": "vault",
+    "machine": "work-laptop",
+    "kit": true
   }
 }
 ```
@@ -281,6 +312,7 @@ agyh can approve shell commands, so it is built to fail closed:
 | `AGYH_SYNC_ENDPOINT` | Custom S3 endpoint URL (e.g. `https://<account>.r2.cloudflarestorage.com`) |
 | `AGYH_SYNC_BUCKET` | S3 bucket name |
 | `AGYH_SYNC_PASSPHRASE` | Passphrase for client-side AES-256-GCM zero-knowledge encryption |
+| `AGYH_SYNC_MACHINE` | Name of this machine's kit snapshot (default: hostname) |
 
 Run the bridge as a user service:
 

@@ -35,13 +35,14 @@ func writeHeader(t *testing.T, v *vault, h vaultHeader) {
 	v.set(headerObj, raw)
 }
 
-// blobFormats counts stored blobs (manifest + sessions) by magic.
+// blobFormats counts stored blobs (manifest + sessions) by magic. Kit blobs
+// are covered by kit_test.go.
 func blobFormats(v *vault) map[string]int {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	out := map[string]int{}
 	for k, b := range v.objects {
-		if strings.HasSuffix(k, ".blob") && len(b) >= 4 {
+		if strings.HasSuffix(k, ".blob") && !strings.Contains(k, "/kit/") && len(b) >= 4 {
 			out[string(b[:4])]++
 		}
 	}

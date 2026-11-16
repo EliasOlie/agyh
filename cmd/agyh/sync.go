@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -88,6 +90,7 @@ or via AGYH_SYNC_* environment variables.`,
 					res, err = engine.Sync(ctx)
 				}
 				if err != nil {
+					printKit(cmd.ErrOrStderr(), res.Kit)
 					return err
 				}
 				if asJSON {
@@ -97,6 +100,7 @@ or via AGYH_SYNC_* environment variables.`,
 				fmt.Fprintf(w, "  Uploaded:   %d sessions\n", res.Uploaded)
 				fmt.Fprintf(w, "  Downloaded: %d sessions\n", res.Downloaded)
 				fmt.Fprintf(w, "  Total:      %d sessions in vault\n", res.Total)
+				printKit(w, res.Kit)
 				if res.LegacyBlobs {
 					fmt.Fprintln(w, legacyHint)
 				}
@@ -124,13 +128,96 @@ or via AGYH_SYNC_* environment variables.`,
 			transfer((*sync.Engine).Migrate, func(r sync.SyncResult) string {
 				return fmt.Sprintf("✓ Re-encrypted %d sessions with this vault's own salt (Argon2id); %d in vault", r.Uploaded, r.Total)
 			})),
-		// restore rebuilds the index from the vault, so it must not index first.
-		a.syncSub("restore", "Reconstruct local database by restoring all sessions from cloud vault", false,
-			transfer((*sync.Engine).Restore, func(r sync.SyncResult) string {
-				return fmt.Sprintf("✓ Restored %d sessions from cloud vault into local index", r.Downloaded)
-			})),
+		a.restoreCmd(),
 	)
 	return cmd
+}
+
+// restoreCmd rebuilds the index from the vault and restores this machine's
+// kit (skills, plugin list, MCP servers) into agyh's data dir.
+func (a *app) restoreCmd() *cobra.Command {
+	var (
+		asJSON  bool
+		machine string
+	)
+	c := &cobra.Command{
+		Use:   "restore",
+		Short: "Rebuild the local index from the vault, and restore this machine's skills, plugins and MCP servers",
+		Long: `Downloads every session from the vault into the local index, then restores a
+machine's kit (skills, plugin list, MCP servers with their secrets) into agyh's
+own data directory. Agents' configurations are never modified.
+
+By default the kit of the machine with this name (sync.machine, else the
+hostname) is restored; after reinstalling a machine under a new name, pick the
+old one with --machine (agyh sync status lists them).`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// restore rebuilds the index from the vault, so it must not index first.
+			return a.withVault(cmd, false, func(e *sync.Engine, cfg *config.Config) error {
+				w, ctx := cmd.OutOrStdout(), cmd.Context()
+				res, err := e.Restore(ctx)
+				if err != nil {
+					return err
+				}
+				out := struct {
+					sync.SyncResult
+					Kit      *sync.KitResult   `json:"kit,omitempty"`
+					Machines []sync.KitMachine `json:"kit_machines,omitempty"`
+				}{SyncResult: res}
+				var kitErr error
+				if cfg.Sync.KitEnabled() {
+					kit, err := e.RestoreKit(ctx, machine)
+					switch {
+					case errors.Is(err, sync.ErrNoKit):
+						out.Machines, _ = e.KitMachines(ctx)
+						kitErr = fmt.Errorf("%w; machines in the vault: %s (choose one with --machine)", err, machineNames(out.Machines))
+					case err != nil:
+						kitErr = fmt.Errorf("sessions restored, but the kit restore failed: %w", err)
+					default:
+						out.Kit = &kit
+					}
+				}
+				if asJSON {
+					if err := printJSON(w, out); err != nil {
+						return err
+					}
+					return kitErr
+				}
+				fmt.Fprintf(w, "✓ Restored %d sessions from cloud vault into local index\n", res.Downloaded)
+				if out.Kit != nil {
+					fmt.Fprintf(w, "✓ Restored the kit of %s: %d skills, %d MCP servers, %d plugins\n  into %s\n",
+						out.Kit.Machine, out.Kit.Skills, out.Kit.MCP, out.Kit.Plugins, shortPath(out.Kit.Dir))
+					fmt.Fprintln(w, "  Your agents were not modified: their files are untouched.")
+				}
+				return kitErr
+			})
+		},
+	}
+	c.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	c.Flags().StringVar(&machine, "machine", "", "restore the kit of this machine (default: this one)")
+	return c
+}
+
+func machineNames(ms []sync.KitMachine) string {
+	if len(ms) == 0 {
+		return "none"
+	}
+	names := make([]string, len(ms))
+	for i, m := range ms {
+		names[i] = m.Name
+	}
+	return strings.Join(names, ", ")
+}
+
+// printKit summarizes a kit backup.
+func printKit(w io.Writer, k *sync.KitResult) {
+	if k == nil {
+		return
+	}
+	fmt.Fprintf(w, "  Kit:        %d skills (%d new), %d MCP servers, %d plugins, as %q\n", k.Skills, k.NewSkills, k.MCP, k.Plugins, k.Machine)
+	for _, warn := range k.Warnings {
+		fmt.Fprintln(w, "  ! "+warn)
+	}
 }
 
 // syncSub builds one `agyh sync <name>` subcommand with its own --json flag.
@@ -159,6 +246,7 @@ func transfer(op func(*sync.Engine, context.Context) (sync.SyncResult, error), s
 			return printJSON(cmd.OutOrStdout(), res)
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), summary(res))
+		printKit(cmd.OutOrStdout(), res.Kit)
 		if res.LegacyBlobs {
 			fmt.Fprintln(cmd.OutOrStdout(), legacyHint)
 		}
@@ -192,6 +280,17 @@ func printSyncStatus(w io.Writer, r sync.StatusReport) error {
 	fmt.Fprintf(tw, "Encryption:\t%s\n", enc)
 	if !r.LastSynced.IsZero() {
 		fmt.Fprintf(tw, "Last vault update:\t%s\n", bridge.Ago(r.LastSynced))
+	}
+	fmt.Fprintf(tw, "This machine:\t%s\n", r.Machine)
+	if len(r.KitMachines) == 0 {
+		fmt.Fprintf(tw, "Kit snapshots:\tnone yet (agyh sync creates one)\n")
+	}
+	for i, m := range r.KitMachines {
+		label := ""
+		if i == 0 {
+			label = "Kit snapshots:"
+		}
+		fmt.Fprintf(tw, "%s\t%s: %d skills, %d MCP servers, %d plugins, %s\n", label, m.Name, m.Skills, m.MCP, m.Plugins, bridge.Ago(m.UpdatedAt))
 	}
 	return tw.Flush()
 }

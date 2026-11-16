@@ -44,8 +44,22 @@ func (v *vault) set(key string, data []byte) {
 	v.objects[key] = data
 }
 
+// isolateAgents points every agent location at an empty temp HOME, so kit
+// backups in tests never read the developer's real skills or MCP config.
+func isolateAgents(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, k := range []string{"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_PLUGIN_CACHE_DIR", "AGYH_AGY_DIR", "AGYH_AGY_CONFIG_DIR", "CODEX_HOME", "AGYH_CODEX_ADMIN_SKILLS"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("AGYH_CODEX_ADMIN_SKILLS", filepath.Join(home, "no-admin-skills"))
+	return home
+}
+
 func newVault(t *testing.T) (*vault, config.Sync) {
 	t.Helper()
+	isolateAgents(t)
 	t.Setenv("XDG_DATA_HOME", t.TempDir()) // archives of downloaded sessions
 	v := &vault{objects: map[string][]byte{}}
 	srv := httptest.NewServer(http.HandlerFunc(v.serve))
