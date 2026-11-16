@@ -28,7 +28,20 @@ type vault struct {
 	delay   time.Duration
 
 	inflight, maxInflight atomic.Int32
-	puts                  atomic.Int32
+	puts                  atomic.Int32 // session blobs
+	allPuts               atomic.Int32 // every successful PUT
+}
+
+func (v *vault) get(key string) []byte {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.objects[key]
+}
+
+func (v *vault) set(key string, data []byte) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.objects[key] = data
 }
 
 func newVault(t *testing.T) (*vault, config.Sync) {
@@ -61,8 +74,13 @@ func (v *vault) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		if _, exists := v.objects[key]; exists && r.Header.Get("If-None-Match") == "*" {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		v.objects[key] = body
+		v.allPuts.Add(1)
 		if strings.Contains(key, "/sessions/") {
 			v.puts.Add(1)
 		}

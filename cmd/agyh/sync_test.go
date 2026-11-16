@@ -49,7 +49,7 @@ func TestSyncCommands(t *testing.T) {
 	// Status before anything is uploaded, in both spellings.
 	for _, args := range [][]string{{"sync", "status"}, {"sync", "--status"}} {
 		out := mustRun(t, args...)
-		for _, want := range []string{"Endpoint:", endpoint, "vault-test", "Local sessions:", "To upload:"} {
+		for _, want := range []string{"Endpoint:", endpoint, "vault-test", "Local sessions:", "To upload:", "v2: Argon2id, per-vault salt"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("agyh %s is missing %q:\n%s", strings.Join(args, " "), want, out)
 			}
@@ -87,6 +87,14 @@ func TestSyncCommands(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(mustRun(t, "sync", "push", "--json")), &res); err != nil || res.Uploaded != 2 || res.Total != 2 {
 		t.Fatalf("push --json: %+v %v", res, err)
+	}
+
+	// A vault created by this version has nothing to migrate.
+	if out := mustRun(t, "sync", "migrate"); out != "✓ Re-encrypted 0 sessions with this vault's own salt (Argon2id); 2 in vault\n" {
+		t.Fatalf("sync migrate: %q", out)
+	}
+	if out := mustRun(t, "sync"); strings.Contains(out, "legacy") {
+		t.Fatalf("no legacy hint expected on a v2 vault:\n%s", out)
 	}
 
 	// Fresh machine: no agent files, empty index. restore rebuilds it from the vault.

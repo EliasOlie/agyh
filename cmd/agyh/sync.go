@@ -39,6 +39,9 @@ func (a *app) withVault(cmd *cobra.Command, reindex bool, fn func(e *sync.Engine
 	return fn(engine, cfg)
 }
 
+// legacyHint is shown while v1 blobs (shared-salt PBKDF2) remain in the vault.
+const legacyHint = "! Some sessions still use the legacy vault encryption (shared salt). Run `agyh sync migrate` to re-encrypt them."
+
 func printJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -94,6 +97,9 @@ or via AGYH_SYNC_* environment variables.`,
 				fmt.Fprintf(w, "  Uploaded:   %d sessions\n", res.Uploaded)
 				fmt.Fprintf(w, "  Downloaded: %d sessions\n", res.Downloaded)
 				fmt.Fprintf(w, "  Total:      %d sessions in vault\n", res.Total)
+				if res.LegacyBlobs {
+					fmt.Fprintln(w, legacyHint)
+				}
 				return nil
 			})
 		},
@@ -113,6 +119,10 @@ or via AGYH_SYNC_* environment variables.`,
 		a.syncSub("pull", "Download any missing or updated sessions from cloud vault", true,
 			transfer((*sync.Engine).Pull, func(r sync.SyncResult) string {
 				return fmt.Sprintf("✓ Pulled %d sessions from vault (%d total)", r.Downloaded, r.Total)
+			})),
+		a.syncSub("migrate", "Re-encrypt sessions still using the legacy vault key (v1) with the vault's own key", false,
+			transfer((*sync.Engine).Migrate, func(r sync.SyncResult) string {
+				return fmt.Sprintf("✓ Re-encrypted %d sessions with this vault's own salt (Argon2id); %d in vault", r.Uploaded, r.Total)
 			})),
 		// restore rebuilds the index from the vault, so it must not index first.
 		a.syncSub("restore", "Reconstruct local database by restoring all sessions from cloud vault", false,
@@ -149,6 +159,9 @@ func transfer(op func(*sync.Engine, context.Context) (sync.SyncResult, error), s
 			return printJSON(cmd.OutOrStdout(), res)
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), summary(res))
+		if res.LegacyBlobs {
+			fmt.Fprintln(cmd.OutOrStdout(), legacyHint)
+		}
 		return nil
 	}
 }
@@ -172,6 +185,11 @@ func printSyncStatus(w io.Writer, r sync.StatusReport) error {
 	fmt.Fprintf(tw, "Remote vault:\t%d\n", r.RemoteSessions)
 	fmt.Fprintf(tw, "To upload:\t%d\n", r.ToUpload)
 	fmt.Fprintf(tw, "To download:\t%d\n", r.ToDownload)
+	enc := "v2: Argon2id, per-vault salt"
+	if r.LegacyEncryption {
+		enc = "legacy v1 blobs present: run `agyh sync migrate`"
+	}
+	fmt.Fprintf(tw, "Encryption:\t%s\n", enc)
 	if !r.LastSynced.IsZero() {
 		fmt.Fprintf(tw, "Last vault update:\t%s\n", bridge.Ago(r.LastSynced))
 	}

@@ -62,24 +62,44 @@ func (c *S3Client) SetHTTPClient(client *http.Client) {
 }
 
 func (c *S3Client) Put(ctx context.Context, key string, data []byte) error {
+	_, err := c.put(ctx, key, data, false)
+	return err
+}
+
+// PutIfAbsent writes key only if it does not exist yet (If-None-Match: *,
+// supported by AWS S3, R2 and MinIO). It reports false when the object was
+// already there. Providers that ignore the header overwrite instead, so
+// callers re-read the object afterwards.
+func (c *S3Client) PutIfAbsent(ctx context.Context, key string, data []byte) (bool, error) {
+	return c.put(ctx, key, data, true)
+}
+
+func (c *S3Client) put(ctx context.Context, key string, data []byte, ifAbsent bool) (bool, error) {
 	req, err := c.newRequest(ctx, http.MethodPut, key, nil, data)
 	if err != nil {
-		return err
+		return false, err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+	if ifAbsent {
+		req.Header.Set("If-None-Match", "*")
+	}
 	c.signRequest(req, data)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("s3 put %s: %w", key, err)
+		return false, fmt.Errorf("s3 put %s: %w", key, err)
 	}
 	defer resp.Body.Close()
 
+	// 412: the object exists. 409: a concurrent conditional write is in flight.
+	if ifAbsent && (resp.StatusCode == http.StatusPreconditionFailed || resp.StatusCode == http.StatusConflict) {
+		return false, nil
+	}
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("s3 put %s failed (status %d): %s", key, resp.StatusCode, string(body))
+		return false, fmt.Errorf("s3 put %s failed (status %d): %s", key, resp.StatusCode, string(body))
 	}
-	return nil
+	return true, nil
 }
 
 func (c *S3Client) Get(ctx context.Context, key string) ([]byte, error) {
