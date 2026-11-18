@@ -24,7 +24,10 @@ func (a *app) hookCmd() *cobra.Command {
 		Short:  "Entry points called by agent hooks (see `agyh install-hooks`)",
 		Hidden: false,
 	}
-	var agent, tty string
+	var (
+		agent, tty string
+		policyOnly bool
+	)
 
 	pre := &cobra.Command{
 		Use:   "pre-tool-use",
@@ -42,6 +45,18 @@ func (a *app) hookCmd() *cobra.Command {
 				out.Write(hook.Output(agent, policy.Ask, "agyh config error: "+err.Error()))
 				return nil
 			}
+			if policyOnly {
+				// Only the local policy: block fatal commands (in any mode,
+				// auto included) and let read-only ones through. Anything else
+				// gets no output, so the agent's own permission flow (and the
+				// PermissionRequest hook) decides.
+				if pol, err := policy.New(cfg.Policy.Safe, cfg.Policy.Fatal); err == nil && req.IsShell() {
+					if v, reason := pol.Classify(req.Command); v != policy.Ask {
+						out.Write(hook.Output(agent, v, reason))
+					}
+				}
+				return nil
+			}
 			v, reason := decide(cmd.Context(), cfg, req, useTTY(agent, tty))
 			out.Write(hook.Output(agent, v, reason))
 			return nil
@@ -49,6 +64,34 @@ func (a *app) hookCmd() *cobra.Command {
 	}
 	pre.Flags().StringVar(&agent, "agent", "claude", "agent calling the hook: claude or agy")
 	pre.Flags().StringVar(&tty, "tty", "auto", "also ask in the terminal: auto (agy only), on, off")
+	pre.Flags().BoolVar(&policyOnly, "policy-only", false, "only apply the local policy (fatal: deny, read-only: allow); never ask")
+
+	permission := &cobra.Command{
+		Use:   "permission-request",
+		Short: "Claude Code PermissionRequest hook: approve on your phone when Claude would ask you",
+		Long: `Runs only when Claude Code is about to ask for permission. In auto,
+dontAsk and bypassPermissions modes it stays out of the way. Otherwise:
+fatal commands are denied, read-only ones allowed, and anything else is
+sent to Telegram/WhatsApp; with no answer (or no bridge) Claude shows its
+own prompt as usual.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			req, err := hook.Parse("claude", cmd.InOrStdin())
+			if err != nil || req.SelfApproving() {
+				return nil
+			}
+			cfg, err := config.Load()
+			if err != nil {
+				return nil
+			}
+			v, reason := decide(cmd.Context(), cfg, req, false)
+			if v == policy.Deny && reason == "" {
+				reason = "denied from your phone"
+			}
+			cmd.OutOrStdout().Write(hook.PermissionOutput(v, reason))
+			return nil
+		},
+	}
 
 	stop := &cobra.Command{
 		Use:   "stop",
@@ -65,7 +108,7 @@ func (a *app) hookCmd() *cobra.Command {
 	}
 	stop.Flags().StringVar(&agent, "agent", "claude", "agent calling the hook: claude or agy")
 
-	cmd.AddCommand(pre, stop)
+	cmd.AddCommand(pre, permission, stop)
 	return cmd
 }
 

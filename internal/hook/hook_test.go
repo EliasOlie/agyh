@@ -59,3 +59,34 @@ func TestOutput(t *testing.T) {
 		t.Fatalf("agy allow: %v", a)
 	}
 }
+
+func TestPermissionRequestParsingAndOutput(t *testing.T) {
+	r, err := Parse("claude", strings.NewReader(`{"session_id":"s","cwd":"/w","permission_mode":"auto","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"npm publish"}}`))
+	if err != nil || r.PermissionMode != "auto" || !r.SelfApproving() || r.Command != "npm publish" {
+		t.Fatalf("parse: %+v %v", r, err)
+	}
+	for mode, self := range map[string]bool{"default": false, "plan": false, "acceptEdits": false, "auto": true, "dontAsk": true, "bypassPermissions": true, "": false} {
+		if (Request{PermissionMode: mode}).SelfApproving() != self {
+			t.Errorf("mode %q", mode)
+		}
+	}
+	var out struct {
+		H struct {
+			Event    string `json:"hookEventName"`
+			Decision struct {
+				Behavior, Message string
+			} `json:"decision"`
+		} `json:"hookSpecificOutput"`
+	}
+	json.Unmarshal(PermissionOutput(policy.Allow, ""), &out)
+	if out.H.Event != "PermissionRequest" || out.H.Decision.Behavior != "allow" {
+		t.Fatalf("allow: %+v", out)
+	}
+	json.Unmarshal(PermissionOutput(policy.Deny, "no"), &out)
+	if out.H.Decision.Behavior != "deny" || out.H.Decision.Message != "no" {
+		t.Fatalf("deny: %+v", out)
+	}
+	if PermissionOutput(policy.Ask, "") != nil {
+		t.Fatal("ask must print nothing so Claude shows its own prompt")
+	}
+}

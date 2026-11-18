@@ -66,13 +66,22 @@ Run without arguments for the interactive browser.`,
 			if err != nil {
 				return err
 			}
-			res, err := tui.Run(cmd.Context(), st, tui.Options{Query: joinArgs(args), Project: project, Remote: remoteStatus(cmd.Context())})
+			var workspaces []string
+			if cfg, err := config.Load(); err == nil {
+				workspaces = cfg.Workspaces
+			}
+			res, err := tui.Run(cmd.Context(), st, tui.Options{Query: joinArgs(args), Project: project,
+				Remote: remoteStatus(cmd.Context()), Workspaces: workspaces})
 			st.Close()
 			if err != nil {
 				return err
 			}
-			if res.Resume != nil {
+			switch {
+			case res.Resume != nil:
 				return resume(*res.Resume)
+			case res.New != nil:
+				n := res.New
+				return a.startSession(cmd.Context(), NewSession{Agent: n.Agent, Dir: n.Dir, Prompt: n.Prompt, Project: n.Project})
 			}
 			return nil
 		},
@@ -80,7 +89,7 @@ Run without arguments for the interactive browser.`,
 	root.PersistentFlags().StringVar(&a.dbPath, "db", store.DefaultPath(), "index database path")
 	root.Flags().StringVarP(&project, "project", "p", "", "open the browser inside one project")
 	root.AddCommand(
-		a.lsCmd(), a.searchCmd(), a.showCmd(), a.resumeCmd(), a.indexCmd(), a.projectCmd(),
+		a.lsCmd(), a.searchCmd(), a.showCmd(), a.resumeCmd(), a.newCmd(), a.indexCmd(), a.projectCmd(),
 		a.hookCmd(), a.bridgeCmd(), a.connectCmd(), installHooksCmd(), a.syncCmd(), a.doctorCmd(), skillsCmd(), mcpCmd(),
 	)
 	return root
@@ -123,6 +132,10 @@ func (a *app) openSynced(ctx context.Context, full bool) (*store.Store, error) {
 	}
 	if _, err := index.Sync(ctx, st, source.All(), full); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "agyh: index warning:", err)
+	}
+	// Sessions started with `agyh new --project` join their project once indexed.
+	if _, err := st.ResolvePending(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "agyh: project warning:", err)
 	}
 	return st, nil
 }

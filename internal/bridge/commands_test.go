@@ -3,11 +3,13 @@ package bridge
 import (
 	"context"
 	"errors"
+	"github.com/EliasOlie/agyh/internal/model"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/EliasOlie/agyh/internal/config"
 	vaultsync "github.com/EliasOlie/agyh/internal/sync"
 )
 
@@ -115,5 +117,58 @@ func TestDefaultRunnerIsStable(t *testing.T) {
 	cfg.Runners = nil
 	if got := b.defaultRunner(); got != "" {
 		t.Fatalf("no runners: %q", got)
+	}
+}
+
+func TestNewWithEveryAgentAndProjectColors(t *testing.T) {
+	b, st, _, cfg := newBridge(t, 5)
+	ch := newFake("telegram")
+	b.AddChannel(ch)
+	cfg.Runners = config.Default().Runners
+	r := &fakeRunner{done: make(chan struct{})}
+	b.runner = r
+	m := waMarkup{}
+	ctx := context.Background()
+
+	if out := b.Execute(ctx, m, "telegram", "/new agy @api fix the build"); !strings.Contains(out, "Started") {
+		t.Fatalf("/new agy: %s", out)
+	}
+	<-r.done
+	r.mu.Lock()
+	if strings.Join(r.argv, "|") != "agy|-p|fix the build" || r.dir != "/w/api" {
+		t.Fatalf("agy runner: %q in %s", r.argv, r.dir)
+	}
+	r.mu.Unlock()
+
+	cfg.Runners["codex"] = nil // an empty runner disables the agent
+	r2 := &fakeRunner{done: make(chan struct{})}
+	b.runner = r2
+	b.Execute(ctx, m, "telegram", "/new codex hello")
+	<-r2.done
+	r2.mu.Lock()
+	if r2.argv[0] != "claude" || r2.argv[len(r2.argv)-1] != "codex hello" {
+		t.Fatalf("a disabled runner is just a word of the prompt: %q", r2.argv)
+	}
+	r2.mu.Unlock()
+
+	st.EnsureProject(ctx, "pix")
+	st.SetProjectColor(ctx, "pix", "red")
+	if out := b.Execute(ctx, m, "telegram", "/projects"); !strings.Contains(out, "🟥") {
+		t.Fatalf("/projects should show the project's color: %s", out)
+	}
+}
+
+func TestSaveSteersAwayFromDuplicates(t *testing.T) {
+	b, st, _, _ := newBridge(t, 5)
+	ctx := context.Background()
+	now := time.Now()
+	st.Upsert(ctx, model.Session{Agent: "claude", ID: "aaaa1111bbbb", Title: "x", Path: "/p", UpdatedAt: now, ModTime: now}, nil)
+	st.CreateProject(ctx, "conecta-me", "")
+	out := b.Execute(ctx, waMarkup{}, "telegram", "/save aaaa1111 conectame")
+	if !strings.Contains(out, "looks like the existing") || !strings.Contains(out, "conecta-me") {
+		t.Fatalf("/save similar: %s", out)
+	}
+	if ps, _ := st.Projects(ctx); len(ps) != 1 {
+		t.Fatalf("no duplicate may be created: %+v", ps)
 	}
 }

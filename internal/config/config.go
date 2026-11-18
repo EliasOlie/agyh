@@ -83,6 +83,9 @@ func Default() *Config {
 		ApprovalTimeoutSec: 120,
 		Runners: map[string][]string{
 			"claude": {"claude", "-p", "{prompt}"},
+			"agy":    {"agy", "-p", "{prompt}"},
+			// OpenAI's documented headless mode; untested against a real Codex install.
+			"codex": {"codex", "exec", "{prompt}"},
 		},
 	}
 }
@@ -124,7 +127,14 @@ func LoadFrom(path string) (*Config, error) {
 		c.ApprovalTimeoutSec = Default().ApprovalTimeoutSec
 	}
 	if c.Runners == nil {
-		c.Runners = Default().Runners
+		c.Runners = map[string][]string{}
+	}
+	// Agents added in later versions get their default runner unless the
+	// config already defines one (or disables it with an empty list).
+	for agent, argv := range Default().Runners {
+		if _, ok := c.Runners[agent]; !ok {
+			c.Runners[agent] = argv
+		}
 	}
 	if v := os.Getenv("AGYH_SYNC_ENDPOINT"); v != "" {
 		c.Sync.Endpoint = v

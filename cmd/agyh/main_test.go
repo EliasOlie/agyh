@@ -683,14 +683,14 @@ func TestRemoteStatus(t *testing.T) {
 
 func TestPrintHits(t *testing.T) {
 	var buf bytes.Buffer
-	_ = printHits(&buf, nil, true)
+	_ = printHits(&buf, nil, true, nil)
 	if strings.TrimSpace(buf.String()) != "[]" {
 		t.Fatalf("nil hits as JSON: %q", buf.String())
 	}
 	buf.Reset()
 	hits := []store.Hit{{Snippet: "…a [match]…", Projects: []string{"a", "b"}}}
 	hits[0].Agent, hits[0].ID, hits[0].Title = "codex", "0123456789abcdef", strings.Repeat("x", 100)
-	_ = printHits(&buf, hits, false)
+	_ = printHits(&buf, hits, false, nil)
 	out := buf.String()
 	if !strings.Contains(out, "01234567 ") || strings.Contains(out, "0123456789") ||
 		!strings.Contains(out, "#a #b") || !strings.Contains(out, "[match]") || !strings.Contains(out, "…") {

@@ -37,6 +37,9 @@ type Manifest struct {
 	Projects        []store.Project              `json:"projects,omitempty"`
 	ProjectSessions map[string][]string          `json:"project_sessions,omitempty"` // agent:id -> [projects]
 	Notes           map[string]map[string]string `json:"notes,omitempty"`            // agent:id -> (project -> note)
+	// Tombstones carry deleted projects and removed memberships between
+	// machines; the vault otherwise merges by union and would revive them.
+	Tombstones store.Tombstones `json:"tombstones,omitzero"`
 }
 
 func NewManifest() *Manifest {

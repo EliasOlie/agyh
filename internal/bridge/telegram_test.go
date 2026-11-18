@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/EliasOlie/agyh/internal/policy"
 )
@@ -138,4 +140,24 @@ func TestParseCallback(t *testing.T) {
 func mustJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+func TestSendRetriesWhenTelegramFlakes(t *testing.T) {
+	old := sendRetryDelays
+	sendRetryDelays = []time.Duration{0, 0}
+	t.Cleanup(func() { sendRetryDelays = old })
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": 1}})
+	}))
+	defer srv.Close()
+	c := NewTelegramClient("TOKEN")
+	c.BaseURL = srv.URL
+	if err := NewTelegram(c, 42).Send(context.Background(), "✅ claude finished"); err != nil || calls.Load() != 2 {
+		t.Fatalf("send after one failure: %v (calls %d)", err, calls.Load())
+	}
 }

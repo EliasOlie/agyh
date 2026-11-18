@@ -121,3 +121,12 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 	}
 	return false
 }
+
+// Start: `codex <prompt>` opens an interactive session with that first
+// message (OpenAI's public docs; untested against a real Codex install).
+func (c *Codex) Start(prompt string) []string {
+	if prompt == "" {
+		return []string{"codex"}
+	}
+	return []string{"codex", prompt}
+}

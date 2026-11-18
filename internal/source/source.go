@@ -39,6 +39,9 @@ type Source interface {
 	Load(ctx context.Context, ref Ref) (model.Session, []model.Message, error)
 	// Resume returns the working directory and argv that reopen the session.
 	Resume(s model.Session) (dir string, argv []string)
+	// Start returns the argv of a new interactive session, with an optional
+	// first prompt (it stays open after answering it).
+	Start(prompt string) []string
 }
 
 // All returns every supported source, rooted at the user's home directory.

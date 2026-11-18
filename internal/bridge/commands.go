@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/EliasOlie/agyh/internal/colors"
 	"github.com/EliasOlie/agyh/internal/hook"
 	"github.com/EliasOlie/agyh/internal/model"
 	"github.com/EliasOlie/agyh/internal/policy"
@@ -257,7 +258,7 @@ func (b *Bridge) projects(ctx context.Context, m Markup) string {
 	var sb strings.Builder
 	sb.WriteString(m.Bold("Projects") + "\n")
 	for _, p := range ps {
-		fmt.Fprintf(&sb, "\n• %s — %d sessions", m.Code(p.Name), p.Sessions)
+		fmt.Fprintf(&sb, "\n%s %s — %d sessions", colors.For(p.Name, p.Color).Emoji, m.Code(p.Name), p.Sessions)
 		if !p.LastActive.IsZero() {
 			sb.WriteString(" · " + Ago(p.LastActive))
 		}
@@ -275,6 +276,11 @@ func (b *Bridge) save(ctx context.Context, m Markup, rest string) string {
 		return m.Escape(err.Error())
 	}
 	note := strings.Join(f[2:], " ")
+	var sim *store.ErrSimilarProject
+	if err := b.store.CheckNewProject(ctx, f[1]); errors.As(err, &sim) {
+		return fmt.Sprintf("Project %s looks like the existing %s. Use /save %s %s, or create %s from the terminal (agyh project new --force).",
+			m.Code(f[1]), m.Code(sim.Existing), sess.ShortID(), m.Escape(sim.Existing), m.Escape(f[1]))
+	}
 	if err := b.store.AddToProject(ctx, f[1], sess, note); err != nil {
 		return "Error: " + m.Escape(err.Error())
 	}
@@ -298,7 +304,7 @@ func (b *Bridge) newSession(ctx context.Context, m Markup, rest string) string {
 	f := strings.Fields(rest)
 	agent := ""
 	if len(f) > 0 {
-		if _, ok := b.cfg.Runners[f[0]]; ok {
+		if b.hasRunner(f[0]) {
 			agent, f = f[0], f[1:]
 		}
 	}
@@ -346,16 +352,20 @@ func (b *Bridge) newSession(ctx context.Context, m Markup, rest string) string {
 }
 
 func (b *Bridge) defaultRunner() string {
-	if _, ok := b.cfg.Runners["claude"]; ok {
+	if b.hasRunner("claude") {
 		return "claude"
 	}
 	// Map order is random: pick the alphabetically first so /new is predictable.
-	names := slices.Sorted(maps.Keys(b.cfg.Runners))
-	if len(names) == 0 {
-		return ""
+	for _, name := range slices.Sorted(maps.Keys(b.cfg.Runners)) {
+		if b.hasRunner(name) {
+			return name
+		}
 	}
-	return names[0]
+	return ""
 }
+
+// hasRunner: an agent with a non-empty runner (an empty list disables it).
+func (b *Bridge) hasRunner(agent string) bool { return len(b.cfg.Runners[agent]) > 0 }
 
 // workspace only accepts configured workspaces, so chat can't point a runner anywhere.
 func (b *Bridge) workspace(name string) (string, error) {

@@ -23,6 +23,9 @@ type Request struct {
 	Summary        string `json:"summary"` // human description for non-shell tools
 	Workspace      string `json:"workspace"`
 	TranscriptPath string `json:"transcript_path"`
+	// PermissionMode is Claude Code's mode: default, plan, acceptEdits,
+	// auto, dontAsk or bypassPermissions ("" for other agents).
+	PermissionMode string `json:"permission_mode,omitempty"`
 }
 
 // IsShell reports whether the request runs a shell command (policy applies).
@@ -42,6 +45,7 @@ type claudeInput struct {
 	Cwd            string         `json:"cwd"`
 	ToolName       string         `json:"tool_name"`
 	ToolInput      map[string]any `json:"tool_input"`
+	PermissionMode string         `json:"permission_mode"`
 }
 
 type agyInput struct {
@@ -66,7 +70,7 @@ func Parse(agent string, r io.Reader) (Request, error) {
 		if err := json.Unmarshal(raw, &in); err != nil {
 			return Request{}, fmt.Errorf("parse claude hook input: %w", err)
 		}
-		req := Request{Agent: agent, SessionID: in.SessionID, Tool: in.ToolName,
+		req := Request{Agent: agent, SessionID: in.SessionID, Tool: in.ToolName, PermissionMode: in.PermissionMode,
 			Workspace: in.Cwd, TranscriptPath: in.TranscriptPath}
 		if in.ToolName == "Bash" {
 			req.Command = str(in.ToolInput["command"])
@@ -147,4 +151,31 @@ func ShortenHome(p string) string {
 		return "~" + p[len(home):]
 	}
 	return p
+}
+
+// SelfApproving reports a Claude Code mode in which Claude decides without
+// asking the user (auto, dontAsk, bypassPermissions): agyh stays out of it.
+func (r Request) SelfApproving() bool {
+	switch r.PermissionMode {
+	case "auto", "dontAsk", "bypassPermissions":
+		return true
+	}
+	return false
+}
+
+// PermissionOutput renders a decision for Claude Code's PermissionRequest
+// hook. Ask yields nil: no output lets Claude show its own prompt.
+func PermissionOutput(v policy.Verdict, reason string) []byte {
+	var decision map[string]any
+	switch v {
+	case policy.Allow:
+		decision = map[string]any{"behavior": "allow"}
+	case policy.Deny:
+		decision = map[string]any{"behavior": "deny", "message": reason}
+	default:
+		return nil
+	}
+	b, _ := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{
+		"hookEventName": "PermissionRequest", "decision": decision}})
+	return b
 }

@@ -182,3 +182,11 @@ func firstUserText(msgs []model.Message) string {
 	}
 	return ""
 }
+
+// Start: `agy -i <prompt>` answers the prompt and stays interactive.
+func (a *Agy) Start(prompt string) []string {
+	if prompt == "" {
+		return []string{"agy"}
+	}
+	return []string{"agy", "-i", prompt}
+}

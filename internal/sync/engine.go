@@ -500,7 +500,8 @@ func (e *Engine) applyProjects(ctx context.Context, bundle Bundle) error {
 		if store.ValidProjectName(p) != nil {
 			continue
 		}
-		if err := e.st.AddToProject(ctx, p, bundle.Session, bundle.Notes[p]); err != nil {
+		// Skipped when this machine deleted the project or removed the membership.
+		if _, err := e.st.RestoreMembership(ctx, p, bundle.Session, bundle.Notes[p]); err != nil {
 			return fmt.Errorf("restore project %s for %s: %w", p, bundle.Session.Key(), err)
 		}
 	}
@@ -579,18 +580,81 @@ func mergeProjectList(m *Manifest, local []store.Project) bool {
 		case i < 0:
 			m.Projects = append(m.Projects, lp)
 			changed = true
-		case lp.Description != "" && m.Projects[i].Description == "":
-			m.Projects[i].Description = lp.Description
-			changed = true
+		default:
+			if lp.Description != "" && m.Projects[i].Description == "" {
+				m.Projects[i].Description = lp.Description
+				changed = true
+			}
+			if lp.Color != m.Projects[i].Color && lp.Color != "" {
+				m.Projects[i].Color = lp.Color
+				changed = true
+			}
 		}
 	}
 	return changed
+}
+
+// reconcileTombstones applies the vault's deletions locally, then folds this
+// machine's deletions (and revivals) into the manifest. It reports whether
+// the manifest changed. Newest change wins (see store.ApplyTombstones).
+func (e *Engine) reconcileTombstones(ctx context.Context, m *Manifest) (bool, error) {
+	if m.Tombstones.Projects == nil {
+		m.Tombstones.Projects = map[string]time.Time{}
+	}
+	if m.Tombstones.Memberships == nil {
+		m.Tombstones.Memberships = map[string]time.Time{}
+	}
+	revived, err := e.st.ApplyTombstones(ctx, m.Tombstones)
+	if err != nil {
+		return false, fmt.Errorf("apply deletions from the vault: %w", err)
+	}
+	changed := false
+	for k := range revived.Projects {
+		delete(m.Tombstones.Projects, k)
+		changed = true
+	}
+	for k := range revived.Memberships {
+		delete(m.Tombstones.Memberships, k)
+		changed = true
+	}
+	local, err := e.st.LocalTombstones(ctx)
+	if err != nil {
+		return false, err
+	}
+	for k, t := range local.Projects {
+		if cur, ok := m.Tombstones.Projects[k]; !ok || t.After(cur) {
+			m.Tombstones.Projects[k] = t
+			changed = true
+		}
+	}
+	for k, t := range local.Memberships {
+		if cur, ok := m.Tombstones.Memberships[k]; !ok || t.After(cur) {
+			m.Tombstones.Memberships[k] = t
+			changed = true
+		}
+	}
+	// Deleted projects leave the manifest's project list too.
+	kept := m.Projects[:0]
+	for _, p := range m.Projects {
+		if t, gone := m.Tombstones.Projects[p.Name]; gone && !p.CreatedAt.After(t) {
+			changed = true
+			continue
+		}
+		kept = append(kept, p)
+	}
+	m.Projects = kept
+	return changed, nil
 }
 
 // Sync performs bidirectional synchronization. Remote changes are applied
 // first, so the uploads that follow carry the merged project memberships.
 func (e *Engine) Sync(ctx context.Context) (SyncResult, error) {
 	m, err := e.fetchManifest(ctx)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	// Deletions first: they change which projects each session carries.
+	tombChanged, err := e.reconcileTombstones(ctx, m)
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -635,10 +699,14 @@ func (e *Engine) Sync(ctx context.Context) (SyncResult, error) {
 	if err != nil {
 		return res, errors.Join(uploadErr, fmt.Errorf("read local projects: %w", err))
 	}
-	if mergeProjectList(m, localProjects) || res.Uploaded > 0 {
+	if mergeProjectList(m, localProjects) || res.Uploaded > 0 || tombChanged {
 		if err := e.saveManifest(ctx, m); err != nil {
 			return res, errors.Join(uploadErr, err)
 		}
+	}
+	// The vault now carries every local deletion.
+	if err := e.st.MarkTombstonesShared(ctx); err != nil {
+		return res, errors.Join(uploadErr, err)
 	}
 	if uploadErr != nil {
 		return res, uploadErr
@@ -655,6 +723,9 @@ func (e *Engine) Push(ctx context.Context) (SyncResult, error) {
 	if err != nil {
 		return SyncResult{}, err
 	}
+	if _, err := e.reconcileTombstones(ctx, m); err != nil {
+		return SyncResult{}, err
+	}
 	l, err := e.local(ctx)
 	if err != nil {
 		return SyncResult{}, err
@@ -665,6 +736,11 @@ func (e *Engine) Push(ctx context.Context) (SyncResult, error) {
 	if res.Uploaded > 0 || uploadErr == nil {
 		if err := e.saveManifest(ctx, m); err != nil {
 			return res, errors.Join(uploadErr, err)
+		}
+	}
+	if uploadErr == nil {
+		if err := e.st.MarkTombstonesShared(ctx); err != nil {
+			return res, err
 		}
 	}
 	if uploadErr != nil {
@@ -679,10 +755,19 @@ func (e *Engine) Push(ctx context.Context) (SyncResult, error) {
 // Pull downloads all remote sessions that are missing or newer, and merges
 // project memberships changed on other machines. It never uploads.
 func (e *Engine) Pull(ctx context.Context) (SyncResult, error) {
-	diff, m, err := e.Diff(ctx)
+	m, err := e.fetchManifest(ctx)
 	if err != nil {
 		return SyncResult{}, err
 	}
+	// Apply the vault's deletions; this machine's own are pushed by sync.
+	if _, err := e.st.ApplyTombstones(ctx, m.Tombstones); err != nil {
+		return SyncResult{}, fmt.Errorf("apply deletions from the vault: %w", err)
+	}
+	l, err := e.local(ctx)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	diff := planDiff(m, l)
 	var res SyncResult
 	if res.Downloaded, err = countEach(ctx, diff.ToDownload, func(ctx context.Context, s SessionSummary) error {
 		if err := e.DownloadSession(ctx, s); err != nil {
@@ -710,6 +795,9 @@ func (e *Engine) Restore(ctx context.Context) (SyncResult, error) {
 	m, err := e.fetchManifest(ctx)
 	if err != nil {
 		return SyncResult{}, err
+	}
+	if _, err := e.st.ApplyTombstones(ctx, m.Tombstones); err != nil {
+		return SyncResult{}, fmt.Errorf("apply deletions from the vault: %w", err)
 	}
 	all := slices.Collect(maps.Values(m.Sessions))
 	var res SyncResult

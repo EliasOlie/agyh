@@ -1,18 +1,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/EliasOlie/agyh/internal/bridge"
+	"github.com/EliasOlie/agyh/internal/config"
 	"github.com/EliasOlie/agyh/internal/hook"
 	"github.com/EliasOlie/agyh/internal/index"
 	"github.com/EliasOlie/agyh/internal/model"
@@ -60,7 +64,7 @@ func (a *app) lsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printHits(cmd.OutOrStdout(), hits, f.json)
+			return printHits(cmd.OutOrStdout(), hits, f.json, projectColors(cmd.Context(), st))
 		},
 	}
 	f.bind(cmd)
@@ -83,14 +87,14 @@ func (a *app) searchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printHits(cmd.OutOrStdout(), hits, f.json)
+			return printHits(cmd.OutOrStdout(), hits, f.json, projectColors(cmd.Context(), st))
 		},
 	}
 	f.bind(cmd)
 	return cmd
 }
 
-func printHits(w io.Writer, hits []store.Hit, asJSON bool) error {
+func printHits(w io.Writer, hits []store.Hit, asJSON bool, pcolors map[string]string) error {
 	if asJSON {
 		if hits == nil {
 			hits = []store.Hit{}
@@ -108,7 +112,7 @@ func printHits(w io.Writer, hits []store.Hit, asJSON bool) error {
 	for _, h := range hits {
 		title := model.Truncate(h.Title, 60)
 		if len(h.Projects) > 0 {
-			title += "  #" + strings.Join(h.Projects, " #")
+			title += "  " + projectTags(h.Projects, pcolors)
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", h.ShortID(), h.Agent, bridge.Ago(h.UpdatedAt), title, hook.ShortenHome(h.Workspace))
 		if h.Snippet != "" {
@@ -245,6 +249,11 @@ func resume(sess model.Session) error {
 		return fmt.Errorf("unknown agent %q", sess.Agent)
 	}
 	dir, argv := src.Resume(sess)
+	return launch(dir, argv)
+}
+
+// launch replaces this process with argv, inside dir when it still exists.
+func launch(dir string, argv []string) error {
 	bin, err := exec.LookPath(argv[0])
 	if err != nil {
 		return fmt.Errorf("%s is not installed or not in PATH", argv[0])
@@ -258,8 +267,117 @@ func resume(sess model.Session) error {
 			fmt.Fprintf(os.Stderr, "agyh: workspace %s no longer exists, staying in the current directory\n", dir)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "agyh: %s\n", strings.Join(argv, " "))
-	return execReplace(bin, argv)
+	fmt.Fprintf(os.Stderr, "agyh: %s\n", model.Truncate(strings.Join(argv, " "), 200))
+	return execFn(bin, argv)
+}
+
+// execFn replaces this process with the agent (replaceable in tests).
+var execFn = execReplace
+
+// NewSession is a session to start: agent, workspace, optional first
+// prompt, and the project it should join once it shows up in the index.
+type NewSession struct {
+	Agent, Dir, Prompt, Project string
+}
+
+// startSession records the pending project (if any) and starts the agent.
+func (a *app) startSession(ctx context.Context, n NewSession) error {
+	src := source.ByName(n.Agent)
+	if src == nil {
+		return fmt.Errorf("unknown agent %q (claude, agy, codex)", n.Agent)
+	}
+	argv := src.Start(n.Prompt)
+	if _, err := exec.LookPath(argv[0]); err != nil {
+		return fmt.Errorf("%s is not installed or not in PATH", argv[0])
+	}
+	// Agents record the directory they run in with symlinks resolved (on
+	// macOS /var is /private/var): use the same form, or a pending project
+	// would never match the session.
+	if dir, err := filepath.EvalSymlinks(n.Dir); err == nil {
+		n.Dir = dir
+	}
+	if n.Project != "" {
+		st, err := a.open()
+		if err != nil {
+			return err
+		}
+		var sim *store.ErrSimilarProject
+		if err := st.CheckNewProject(ctx, n.Project); errors.As(err, &sim) {
+			st.Close()
+			return fmt.Errorf("%w: use -p %s (or create %s first with agyh project new --force)", sim, sim.Existing, n.Project)
+		}
+		err = st.AddPendingProject(ctx, n.Agent, n.Dir, n.Project, time.Now())
+		st.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return launch(n.Dir, argv)
+}
+
+// resolveWorkspace accepts "@name" (a configured workspace), a path, or "" (the current directory).
+func resolveWorkspace(ws string) (string, error) {
+	if ws == "" {
+		return os.Getwd()
+	}
+	if name, ok := strings.CutPrefix(ws, "@"); ok {
+		cfg, err := config.Load()
+		if err != nil {
+			return "", err
+		}
+		for _, w := range cfg.Workspaces {
+			if filepath.Base(w) == name || w == name {
+				return w, nil
+			}
+		}
+		return "", fmt.Errorf("no configured workspace named %q (see \"workspaces\" in the config)", name)
+	}
+	if strings.HasPrefix(ws, "~/") {
+		home, _ := os.UserHomeDir()
+		ws = filepath.Join(home, ws[2:])
+	}
+	abs, err := filepath.Abs(ws)
+	if err != nil {
+		return "", err
+	}
+	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", abs)
+	}
+	return abs, nil
+}
+
+func (a *app) newCmd() *cobra.Command {
+	var workspace, project string
+	cmd := &cobra.Command{
+		Use:   "new [claude|agy|codex] [prompt...]",
+		Short: "Start a new session of an agent in a workspace, optionally inside a project",
+		Long: `Starts a new interactive session, like running the agent yourself, in a
+workspace (default: the current directory). With a prompt, the agent answers
+it and stays open. With --project, the session joins that project as soon as
+agyh sees it (the next time agyh runs).
+
+  agyh new                                  # claude in the current directory
+  agyh new agy -w ~/work/api "fix the failing test"
+  agyh new claude -w @pdv -p pagamentos     # a configured workspace, in a project
+
+Codex support follows OpenAI's public docs and has not been tested against a
+real Codex install.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			agent := "claude"
+			if len(args) > 0 && source.ByName(args[0]) != nil {
+				agent, args = args[0], args[1:]
+			}
+			dir, err := resolveWorkspace(workspace)
+			if err != nil {
+				return err
+			}
+			return a.startSession(cmd.Context(), NewSession{Agent: agent, Dir: dir, Prompt: joinArgs(args), Project: project})
+		},
+	}
+	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "directory to start in, or @name of a configured workspace (default: current directory)")
+	cmd.Flags().StringVarP(&project, "project", "p", "", "project the new session joins")
+	return cmd
 }
 
 func (a *app) indexCmd() *cobra.Command {
