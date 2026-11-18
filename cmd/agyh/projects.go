@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/EliasOlie/agyh/internal/bridge"
+	"github.com/EliasOlie/agyh/internal/colors"
 	"github.com/EliasOlie/agyh/internal/store"
 )
 
@@ -65,10 +66,15 @@ func (a *app) projectCmd() *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "No projects yet: agyh project add <name> <session-id>")
 				return nil
 			}
-			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "PROJECT\tSESSIONS\tLAST ACTIVE\tDESCRIPTION")
+			// Colors are applied after alignment: escape codes would skew tabwriter.
+			width := len("PROJECT")
 			for _, p := range ps {
-				fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n", p.Name, p.Sessions, bridge.Ago(p.LastActive), p.Description)
+				width = max(width, len(p.Name))
+			}
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintf(tw, "  %-*s\tSESSIONS\tLAST ACTIVE\tDESCRIPTION\n", width, "PROJECT")
+			for _, p := range ps {
+				fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n", paint("● "+fmt.Sprintf("%-*s", width, p.Name), p.Name, p.Color), p.Sessions, bridge.Ago(p.LastActive), p.Description)
 			}
 			return tw.Flush()
 		},
@@ -141,7 +147,7 @@ func (a *app) projectCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printHits(cmd.OutOrStdout(), hits, showFlags.json)
+			return printHits(cmd.OutOrStdout(), hits, showFlags.json, projectColors(cmd.Context(), st))
 		},
 	}
 	showCmd.Flags().IntVarP(&showFlags.limit, "limit", "n", 100, "maximum sessions to show")
@@ -187,6 +193,30 @@ func (a *app) projectCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(newCmd, lsCmd, addCmd, rmCmd, showCmd, renameCmd, deleteCmd)
+	colorCmd := &cobra.Command{
+		Use:   "color <project> <color>",
+		Short: "Set a project's color (" + paletteNames() + ", #RRGGBB, or auto)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := colors.Parse(args[1])
+			if err != nil {
+				return err
+			}
+			st, err := a.open()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			if err := st.SetProjectColor(cmd.Context(), args[0], c); errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("no project named %s", args[0])
+			} else if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), paint("● "+args[0], args[0], c)+" is now "+map[bool]string{true: "colored automatically", false: c}[c == ""])
+			return nil
+		},
+	}
+
+	cmd.AddCommand(newCmd, lsCmd, addCmd, rmCmd, showCmd, renameCmd, deleteCmd, colorCmd)
 	return cmd
 }

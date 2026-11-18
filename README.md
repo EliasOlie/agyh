@@ -19,7 +19,7 @@ agyh  all agents · 55 sessions
   claude Refresh-token reuse detection                                    28d
          ~/work/auth · …a token_version bump makes the [rotação] revoke every session…
 
-type to search · ↑/↓ · enter open · ctrl+o resume · ctrl+p project · tab agent · esc quit
+type to search · ↑/↓ · enter open · ctrl+o resume · ctrl+n new · ctrl+g projects · ctrl+p save · tab agent · esc quit
 ```
 
 ## Why
@@ -33,7 +33,8 @@ Agent CLIs keep history per tool and per folder. After a few weeks you have hund
 | **One index, every agent** | Antigravity, Claude Code and Codex sessions in one list, newest first. |
 | **Instant full-text search** | SQLite FTS5 over every message: accent- and case-insensitive (`rotacao` finds *rotação*), prefix matching, highlighted snippets. Ranked by BM25 with **recency tiers** (7d ×4 › 15d ×3 › 30d ×2 › 90d ×1.5), so this week's work comes first. |
 | **Incremental indexing** | Only files whose mtime changed are re-parsed: 55 sessions index in ~0.8 s, a re-sync takes ~60 ms. |
-| **Projects** | Save sessions from any agent into named projects, with notes. Filter the browser, the CLI and the chat by project. |
+| **Projects** | Save sessions from any agent into named projects, with notes and a color. Browse them with `ctrl+g`, filter the CLI and the chat by project. |
+| **New sessions** | `agyh new` (or `ctrl+n` in the browser) starts Claude Code, Antigravity or Codex in a workspace, optionally with a first prompt and inside a project. |
 | **Resume anywhere** | `agyh resume <id>` reopens the session in its agent **and** its original workspace. |
 | **Interactive TUI** | Live search as you type, read whole transcripts, resume, save to project, copy the id (OSC 52). |
 | **Encrypted Cloud Vault** | Synchronize sessions & projects across multiple machines via S3-compatible storage (Cloudflare R2, MinIO, AWS S3, any self-hosted S3). Zero-knowledge client-side encryption (AES-256-GCM, Argon2id key with a per-vault random salt). Instant disaster recovery (`agyh sync restore`). |
@@ -100,7 +101,10 @@ agyh resume --last           # reopen the most recent session
 
 agyh project add pagamentos 2ec9 5e6b --note "Pix refunds"
 agyh project ls
+agyh project color pagamentos green
 agyh -p pagamentos           # browser inside one project
+agyh new agy -w ~/work/api "fix the failing test"   # new session
+agyh new claude -w @pdv -p pagamentos               # …that joins a project
 ```
 
 | Command | What it does |
@@ -109,8 +113,9 @@ agyh -p pagamentos           # browser inside one project
 | `agyh ls` / `agyh search <words>` | List or search. Filters: `--agent`, `--project`, `--workspace`, `--all` (sub-agents), `-n`, `--json`. |
 | `agyh show <id>` | Metadata and messages. `--last N`, `--json`. |
 | `agyh resume [<id> \| --last]` | Exec the agent in the session's workspace. `--print` shows the command instead. |
+| `agyh new [claude\|agy\|codex] [prompt…]` | Start a new session in a workspace (`-w dir` or `-w @name`, default: current directory); with `-p project` it joins that project once agyh sees it. |
 | `agyh index [--full]` | Sync the index (normally automatic). |
-| `agyh project new\|ls\|add\|rm\|show\|rename\|delete` | Manage projects. |
+| `agyh project new\|ls\|add\|rm\|show\|rename\|delete\|color` | Manage projects. Each project has a color (derived from its name, or set with `agyh project color <name> <color>`) used in the browser, the CLI and chat. |
 | `agyh sync [status\|push\|pull\|restore\|migrate]` | Synchronize or restore sessions with encrypted cloud vault; `migrate` re-encrypts sessions written by agyh ≤ 0.2 with the vault's own key. |
 | `agyh connect telegram\|whatsapp` | Pair a chat channel. |
 | `agyh bridge` | Run the daemon that connects hooks and chat. |
@@ -200,7 +205,7 @@ Add your own patterns in the config: `"policy": {"safe": ["^make\\s+test(\\s|$)"
 | `/show <id>` · `/ver` | Details and messages / Detalhes e mensagens da conversa |
 | `/save <id> <project> [note]` · `/salvar` | Save a session into a project / Salvar sessão no projeto |
 | `/projects` · `/projetos` | Browse projects / Listar projetos |
-| `/new [agent] [@workspace] <prompt>` · `/novo` | Start a headless session / Iniciar tarefa em background |
+| `/new [claude\|agy\|codex] [@workspace] <prompt>` · `/novo` | Start a headless session / Iniciar tarefa em background (`claude -p`, `agy -p`, `codex exec`) |
 | `/ws` | Workspaces `/new` may use |
 | `/pending` · `/pendentes` | Pending approvals / Aprovações pendentes |
 | `/auto [off <id>]` | Autonomous sessions / Sessões em modo autônomo |
@@ -289,7 +294,7 @@ agyh can approve shell commands, so it is built to fail closed:
   "telegram": { "token": "from @BotFather", "chat_id": 123456789 },
   "whatsapp": { "enabled": true, "jid": "5581999999999@s.whatsapp.net" },
   "approval_timeout_sec": 120,
-  "runners": { "claude": ["claude", "-p", "{prompt}"] },
+  "runners": { "claude": ["claude", "-p", "{prompt}"], "agy": ["agy", "-p", "{prompt}"], "codex": ["codex", "exec", "{prompt}"] },
   "workspaces": ["/home/you/work/api", "/home/you/work/pdv"],
   "manage_agents": false,
   "auto_propagate": false,

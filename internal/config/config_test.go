@@ -31,3 +31,22 @@ func TestSaveLoadAndPermissions(t *testing.T) {
 		t.Fatalf("reload: %+v %v", c2, err)
 	}
 }
+
+func TestRunnerDefaultsAreMergedIntoOlderConfigs(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.json"
+	os.WriteFile(path, []byte(`{"runners":{"claude":["claude","-p","--model","opus","{prompt}"],"codex":[]}}`), 0o600)
+	c, err := LoadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Runners["claude"]) != 5 {
+		t.Fatalf("a configured runner must be kept: %v", c.Runners["claude"])
+	}
+	if got := c.Runners["agy"]; len(got) != 3 || got[0] != "agy" || got[1] != "-p" {
+		t.Fatalf("missing runner gets its default: %v", got)
+	}
+	if len(c.Runners["codex"]) != 0 {
+		t.Fatalf("an explicitly empty runner stays disabled: %v", c.Runners["codex"])
+	}
+}

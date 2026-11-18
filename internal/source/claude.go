@@ -165,3 +165,11 @@ func lastAssistantText(msgs []model.Message, n int) string {
 	}
 	return ""
 }
+
+// Start: `claude <prompt>` opens an interactive session with that first message.
+func (c *Claude) Start(prompt string) []string {
+	if prompt == "" {
+		return []string{"claude"}
+	}
+	return []string{"claude", prompt}
+}

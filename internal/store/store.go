@@ -65,6 +65,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	if err := addColumns(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("update schema: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 

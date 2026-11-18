@@ -234,13 +234,32 @@ func parseCallback(data string) (id, action string, ok bool) {
 // Send splits long text into Telegram-sized messages.
 func (t *Telegram) Send(ctx context.Context, text string) error {
 	for _, part := range chunk(text, 3900) {
-		if err := t.client.Call(ctx, "sendMessage", map[string]any{
-			"chat_id": t.chatID, "text": part, "parse_mode": "HTML", "disable_web_page_preview": true,
-		}, nil); err != nil {
+		payload := map[string]any{"chat_id": t.chatID, "text": part, "parse_mode": "HTML", "disable_web_page_preview": true}
+		if err := t.withRetry(ctx, func() error { return t.client.Call(ctx, "sendMessage", payload, nil) }); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// sendRetryDelays: a notification (an agent finished, a skill was installed)
+// is worth a couple of retries when the network to Telegram flakes.
+var sendRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second}
+
+func (t *Telegram) withRetry(ctx context.Context, call func() error) error {
+	err := call()
+	for _, d := range sendRetryDelays {
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		select {
+		case <-time.After(d):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		err = call()
+	}
+	return err
 }
 
 func approvalText(m Markup, a *Approval) string {

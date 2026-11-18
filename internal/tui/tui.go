@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/EliasOlie/agyh/internal/colors"
 	"github.com/EliasOlie/agyh/internal/hook"
 	"github.com/EliasOlie/agyh/internal/model"
 	"github.com/EliasOlie/agyh/internal/source"
@@ -25,6 +27,13 @@ import (
 // Result is what the user chose before leaving the TUI.
 type Result struct {
 	Resume *model.Session
+	New    *NewSession
+}
+
+// NewSession is a session to start (ctrl+n): agent, workspace, optional
+// first prompt, and the project it should join.
+type NewSession struct {
+	Agent, Dir, Prompt, Project string
 }
 
 type mode int
@@ -32,7 +41,9 @@ type mode int
 const (
 	modeList mode = iota
 	modeDetail
-	modeProject
+	modeProject  // typing a project name to save the selected session into
+	modeProjects // picking a project to browse (ctrl+g)
+	modeNew      // starting a new session (ctrl+n)
 )
 
 // allAgents is the Tab cycle; agents with no indexed session are skipped.
@@ -48,6 +59,8 @@ type Options struct {
 	// Remote describes chat channels for the footer, e.g. "telegram ✓  whatsapp ✗".
 	// Empty means none is connected, and the footer shows how to connect one.
 	Remote string
+	// Workspaces are the configured workspaces, offered when starting a session.
+	Workspaces []string
 }
 
 type debounceMsg struct{ seq int }
@@ -97,6 +110,17 @@ type Model struct {
 	err     error
 	result  Result
 	current *store.Hit
+
+	colors     map[string]string // project -> stored color ("" = derived)
+	projects   []store.Project   // modeProjects
+	projCursor int               // 0 = all sessions, i = projects[i-1]
+
+	newAgents  []string // agents installed on this machine
+	newAgent   int
+	newDirs    []string
+	newDir     int
+	newPrompt  textinput.Model
+	workspaces []string
 }
 
 // New builds the TUI.
@@ -109,10 +133,35 @@ func New(ctx context.Context, st *store.Store, o Options) *Model {
 	pr := textinput.New()
 	pr.Prompt = "project: "
 	pr.Placeholder = "name (created if new)"
-	m := &Model{ctx: ctx, st: st, project: o.Project, remote: o.Remote, search: in, prompt: pr,
-		view: viewport.New(80, 20), agents: availableAgents(ctx, st)}
+	np := textinput.New()
+	np.Prompt = "prompt: "
+	np.Placeholder = "optional first message (empty just opens the agent)"
+	m := &Model{ctx: ctx, st: st, project: o.Project, remote: o.Remote, search: in, prompt: pr, newPrompt: np,
+		view: viewport.New(80, 20), agents: availableAgents(ctx, st), workspaces: o.Workspaces}
+	m.colors, _ = st.ProjectColors(ctx)
 	m.refresh()
 	return m
+}
+
+// projectStyle colors a project consistently with the CLI and chat.
+func (m *Model) projectStyle(name string) lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(colors.For(name, m.colors[name]).Hex))
+}
+
+// lookPath finds agent CLIs (replaceable in tests).
+var lookPath = exec.LookPath
+
+// installedAgents lists agents whose CLI is on PATH, claude first.
+func installedAgents() []string {
+	var out []string
+	for _, name := range []string{"claude", "agy", "codex"} {
+		if src := source.ByName(name); src != nil {
+			if _, err := lookPath(src.Start("")[0]); err == nil {
+				out = append(out, name)
+			}
+		}
+	}
+	return out
 }
 
 func availableAgents(ctx context.Context, st *store.Store) []string {
@@ -232,6 +281,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDetail(msg)
 		case modeProject:
 			return m.updateProject(msg)
+		case modeProjects:
+			return m.updateProjects(msg)
+		case modeNew:
+			return m.updateNew(msg)
 		}
 		return m.updateList(msg)
 	}
@@ -274,6 +327,10 @@ func (m *Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.resume()
 	case "ctrl+p":
 		return m.askProject()
+	case "ctrl+g":
+		return m.openProjects()
+	case "ctrl+n":
+		return m.openNew()
 	case "ctrl+y":
 		m.copyID()
 	default:
@@ -321,6 +378,7 @@ func (m *Model) updateProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.status = "✗ " + err.Error()
 			} else {
 				m.status = fmt.Sprintf("✓ saved %s into %s", h.ShortID(), name)
+				m.colors, _ = m.st.ProjectColors(m.ctx)
 				m.refresh()
 			}
 		}
@@ -331,6 +389,182 @@ func (m *Model) updateProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.prompt, cmd = m.prompt.Update(msg)
 	return m, cmd
+}
+
+// openProjects lists projects to browse; enter scopes the browser to one.
+func (m *Model) openProjects() (tea.Model, tea.Cmd) {
+	ps, err := m.st.Projects(m.ctx)
+	if err != nil {
+		m.status = "✗ " + err.Error()
+		return m, nil
+	}
+	m.projects, m.projCursor = ps, 0
+	for i, p := range ps {
+		if p.Name == m.project {
+			m.projCursor = i + 1
+		}
+	}
+	m.mode = modeProjects
+	return m, nil
+}
+
+func (m *Model) updateProjects(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q", "ctrl+g":
+		m.mode = modeList
+	case "up", "ctrl+k":
+		m.projCursor = max(m.projCursor-1, 0)
+	case "down", "ctrl+j":
+		m.projCursor = min(m.projCursor+1, len(m.projects))
+	case "enter":
+		m.project = ""
+		if m.projCursor > 0 {
+			m.project = m.projects[m.projCursor-1].Name
+		}
+		m.mode = modeList
+		m.cursor, m.offset = 0, 0
+		m.refresh()
+	}
+	return m, nil
+}
+
+// openNew prepares a new session: the installed agents, and workspaces to
+// choose from (the selected session's, the current directory, recent ones in
+// view, then the configured ones).
+func (m *Model) openNew() (tea.Model, tea.Cmd) {
+	m.newAgents = installedAgents()
+	if len(m.newAgents) == 0 {
+		m.status = "✗ no agent CLI (claude, agy, codex) found in PATH"
+		return m, nil
+	}
+	m.newAgent = 0
+	if h := m.selected(); h != nil {
+		for i, a := range m.newAgents {
+			if a == h.Agent {
+				m.newAgent = i
+			}
+		}
+	}
+	seen := map[string]bool{}
+	var dirs []string
+	add := func(d string) {
+		if d == "" || seen[d] {
+			return
+		}
+		if st, err := os.Stat(d); err == nil && st.IsDir() {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	if h := m.selected(); h != nil {
+		add(h.Workspace)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		add(wd)
+	}
+	for _, h := range m.hits {
+		if len(dirs) >= 6 {
+			break
+		}
+		add(h.Workspace)
+	}
+	for _, w := range m.workspaces {
+		add(w)
+	}
+	m.newDirs, m.newDir = dirs, 0
+	m.newPrompt.SetValue("")
+	m.newPrompt.Focus()
+	m.mode = modeNew
+	return m, textinput.Blink
+}
+
+func (m *Model) updateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = modeList
+		m.search.Focus()
+		return m, nil
+	case "tab":
+		m.newAgent = (m.newAgent + 1) % len(m.newAgents)
+		return m, nil
+	case "shift+tab":
+		m.newAgent = (m.newAgent + len(m.newAgents) - 1) % len(m.newAgents)
+		return m, nil
+	case "up", "ctrl+k":
+		if len(m.newDirs) > 0 {
+			m.newDir = (m.newDir + len(m.newDirs) - 1) % len(m.newDirs)
+		}
+		return m, nil
+	case "down", "ctrl+j":
+		if len(m.newDirs) > 0 {
+			m.newDir = (m.newDir + 1) % len(m.newDirs)
+		}
+		return m, nil
+	case "enter":
+		dir := ""
+		if len(m.newDirs) > 0 {
+			dir = m.newDirs[m.newDir]
+		}
+		m.result.New = &NewSession{Agent: m.newAgents[m.newAgent], Dir: dir,
+			Prompt: strings.TrimSpace(m.newPrompt.Value()), Project: m.project}
+		return m, tea.Quit
+	}
+	var cmd tea.Cmd
+	m.newPrompt, cmd = m.newPrompt.Update(msg)
+	return m, cmd
+}
+
+func (m *Model) viewProjects() string {
+	var sb strings.Builder
+	sb.WriteString(titleSt.Render("Projects") + mutedSt.Render(fmt.Sprintf("  %d", len(m.projects))) + "\n\n")
+	row := func(i int, text string) {
+		marker := "  "
+		if i == m.projCursor {
+			marker = titleSt.Render("▸ ")
+		}
+		sb.WriteString(marker + text + "\n")
+	}
+	row(0, selSt.Render("All sessions"))
+	for i, p := range m.projects {
+		dot := m.projectStyle(p.Name).Bold(true).Render("● " + p.Name)
+		info := fmt.Sprintf("  %d sessions · %s", p.Sessions, ago(p.LastActive))
+		if p.Description != "" {
+			info += " · " + model.Truncate(p.Description, max(m.width-40, 10))
+		}
+		row(i+1, dot+mutedSt.Render(info))
+	}
+	if len(m.projects) == 0 {
+		sb.WriteString("\n" + mutedSt.Render("  no projects yet · ctrl+p on a session saves it into one") + "\n")
+	}
+	sb.WriteString("\n" + mutedSt.Render("↑/↓ · enter browse · esc back · change a color: agyh project color <name> <color>"))
+	return sb.String()
+}
+
+func (m *Model) viewNew() string {
+	var sb strings.Builder
+	sb.WriteString(titleSt.Render("New session") + "\n\n")
+	var agents []string
+	for i, a := range m.newAgents {
+		label := " " + a + " "
+		if i == m.newAgent {
+			agents = append(agents, agentTags[a].Bold(true).Reverse(true).Render(label))
+		} else {
+			agents = append(agents, mutedSt.Render(label))
+		}
+	}
+	sb.WriteString("agent      " + strings.Join(agents, " ") + mutedSt.Render("   tab to change") + "\n")
+	dir := "(current directory)"
+	if len(m.newDirs) > 0 {
+		dir = hook.ShortenHome(m.newDirs[m.newDir])
+	}
+	sb.WriteString("workspace  " + selSt.Render(dir) + mutedSt.Render(fmt.Sprintf("   ↑/↓ to change (%d)", len(m.newDirs))) + "\n")
+	if m.project != "" {
+		sb.WriteString("project    " + m.projectStyle(m.project).Bold(true).Render("● "+m.project) +
+			mutedSt.Render("   the session joins it once agyh sees it") + "\n")
+	}
+	sb.WriteString("\n" + m.newPrompt.View() + "\n\n")
+	sb.WriteString(mutedSt.Render("enter start · esc cancel"))
+	return sb.String()
 }
 
 func (m *Model) askProject() (tea.Model, tea.Cmd) {
@@ -388,7 +622,7 @@ func (m *Model) renderDetail(h store.Hit) string {
 	sb.WriteString(mutedSt.Render(fmt.Sprintf("%s · %s · %s · %d messages · %s",
 		h.Agent, hook.ShortenHome(h.Workspace), h.UpdatedAt.Local().Format("2006-01-02 15:04"), h.Messages, h.ID)) + "\n")
 	if len(h.Projects) > 0 {
-		sb.WriteString(statusSt.Render("projects: "+strings.Join(h.Projects, ", ")) + "\n")
+		sb.WriteString(m.projectChips(h.Projects) + "\n")
 	}
 	sb.WriteString("\n")
 	_, msgs, err := source.LoadSessionOrArchive(m.ctx, h.Session)
@@ -420,6 +654,10 @@ func (m *Model) View() string {
 	case modeDetail:
 		return m.view.View() + "\n" + mutedSt.Render(fmt.Sprintf(
 			"↑/↓ scroll · enter resume · p save to project · y copy id · esc back   %3.f%%", m.view.ScrollPercent()*100))
+	case modeProjects:
+		return m.viewProjects()
+	case modeNew:
+		return m.viewNew()
 	}
 	var sb strings.Builder
 	header := titleSt.Render("agyh")
@@ -430,10 +668,11 @@ func (m *Model) View() string {
 	if m.loading {
 		scope += " · searching…"
 	}
+	line := header + mutedSt.Render(fmt.Sprintf("  %s · %d sessions", scope, len(m.hits)))
 	if m.project != "" {
-		scope += " · project " + m.project
+		line += "  " + m.projectStyle(m.project).Bold(true).Render("● "+m.project)
 	}
-	sb.WriteString(header + mutedSt.Render(fmt.Sprintf("  %s · %d sessions", scope, len(m.hits))) + "\n")
+	sb.WriteString(line + "\n")
 	if m.mode == modeProject {
 		sb.WriteString(m.prompt.View() + "\n\n")
 	} else {
@@ -449,7 +688,7 @@ func (m *Model) View() string {
 	for i := m.offset; i < len(m.hits) && i < m.offset+rows; i++ {
 		sb.WriteString(m.renderRow(i) + "\n")
 	}
-	keys := "type to search · ↑/↓ · enter open · ctrl+o resume · ctrl+p project"
+	keys := "type to search · ↑/↓ · enter open · ctrl+o resume · ctrl+n new · ctrl+g projects · ctrl+p save"
 	if len(m.agents) > 2 {
 		keys += " · tab agent"
 	}
@@ -485,16 +724,27 @@ func (m *Model) renderRow(i int) string {
 	}
 	pad := max(m.width-lipgloss.Width(line1)-len(when)-1, 1)
 	line1 += strings.Repeat(" ", pad) + mutedSt.Render(when)
-	second := ws
+	chips := ""
 	if len(h.Projects) > 0 {
-		second += " · #" + strings.Join(h.Projects, " #")
+		chips = " " + m.projectChips(h.Projects)
 	}
+	rest := ws
 	if h.Snippet != "" {
-		second += " · " + h.Snippet
+		rest += " · " + h.Snippet
 	} else if h.Preview != "" {
-		second += " · " + h.Preview
+		rest += " · " + h.Preview
 	}
-	return line1 + "\n" + mutedSt.Render("         "+model.Truncate(second, max(m.width-10, 10)))
+	room := max(m.width-10-lipgloss.Width(chips), 10)
+	return line1 + "\n" + "         " + mutedSt.Render(model.Truncate(rest, room)) + chips
+}
+
+// projectChips renders "#name" tags, each in its project's color.
+func (m *Model) projectChips(projects []string) string {
+	chips := make([]string, len(projects))
+	for i, p := range projects {
+		chips[i] = m.projectStyle(p).Render("#" + p)
+	}
+	return strings.Join(chips, " ")
 }
 
 func ago(t time.Time) string {

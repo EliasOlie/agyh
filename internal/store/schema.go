@@ -39,7 +39,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 CREATE TABLE IF NOT EXISTS projects (
 	name        TEXT PRIMARY KEY,
 	description TEXT NOT NULL DEFAULT '',
-	created_at  INTEGER NOT NULL
+	created_at  INTEGER NOT NULL,
+	color       TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS project_sessions (
 	project  TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -50,6 +51,12 @@ CREATE TABLE IF NOT EXISTS project_sessions (
 	PRIMARY KEY (project, agent, id)
 );
 CREATE INDEX IF NOT EXISTS project_sessions_session ON project_sessions(agent, id);
+CREATE TABLE IF NOT EXISTS pending_projects (
+	agent     TEXT NOT NULL,
+	workspace TEXT NOT NULL,
+	project   TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE ON UPDATE CASCADE,
+	since     INTEGER NOT NULL
+);
 `
 
 // schemaVersion bumps when the index layout changes. Projects are user data
@@ -111,4 +118,29 @@ func tableExists(ctx context.Context, tx *sql.Tx, name string) bool {
 	var n int
 	err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&n)
 	return err == nil && n > 0
+}
+
+// addColumns brings tables created by older versions up to date with
+// additive changes (no rebuild, user data untouched).
+func addColumns(db *sql.DB) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info('projects')`)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return err
+		}
+		have[n] = true
+	}
+	rows.Close()
+	if !have["color"] {
+		if _, err := db.Exec(`ALTER TABLE projects ADD COLUMN color TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
