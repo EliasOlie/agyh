@@ -102,6 +102,7 @@ agyh resume --last           # reopen the most recent session
 agyh project add pagamentos 2ec9 5e6b --note "Pix refunds"
 agyh project ls
 agyh project color pagamentos green
+agyh project merge conectame conecta-me   # fix a duplicate: sessions move, nothing is deleted
 agyh -p pagamentos           # browser inside one project
 agyh new agy -w ~/work/api "fix the failing test"   # new session
 agyh new claude -w @pdv -p pagamentos               # …that joins a project
@@ -115,7 +116,7 @@ agyh new claude -w @pdv -p pagamentos               # …that joins a project
 | `agyh resume [<id> \| --last]` | Exec the agent in the session's workspace. `--print` shows the command instead. |
 | `agyh new [claude\|agy\|codex] [prompt…]` | Start a new session in a workspace (`-w dir` or `-w @name`, default: current directory); with `-p project` it joins that project once agyh sees it. |
 | `agyh index [--full]` | Sync the index (normally automatic). |
-| `agyh project new\|ls\|add\|rm\|show\|rename\|delete\|color` | Manage projects. Each project has a color (derived from its name, or set with `agyh project color <name> <color>`) used in the browser, the CLI and chat. |
+| `agyh project new\|ls\|add\|rm\|show\|rename\|merge\|delete\|color` | Manage projects. Each project has a color (derived from its name, or set with `agyh project color <name> <color>`) used in the browser, the CLI and chat. |
 | `agyh sync [status\|push\|pull\|restore\|migrate]` | Synchronize or restore sessions with encrypted cloud vault; `migrate` re-encrypts sessions written by agyh ≤ 0.2 with the vault's own key. |
 | `agyh connect telegram\|whatsapp` | Pair a chat channel. |
 | `agyh bridge` | Run the daemon that connects hooks and chat. |
@@ -176,7 +177,11 @@ agyh install-hooks claude   # paste into ~/.claude/settings.json
 agyh install-hooks agy      # paste into your Antigravity hooks file
 ```
 
-For Claude Code this adds a `PreToolUse` hook on `Bash` and a `Stop` hook that sends you the agent's final message when it finishes.
+For Claude Code this adds three hooks:
+
+- `PermissionRequest`: when Claude is about to **ask you** for permission (and only then), the request goes to your phone. In Claude's `auto`, `dontAsk` and `bypassPermissions` modes agyh stays out of the way. Without an answer in time (or with no bridge running), Claude shows its own prompt as usual.
+- `PreToolUse` on `Bash`, policy only: fatal commands are blocked in every mode, auto included, and read-only ones are let through. It never asks.
+- `Stop`: sends you the agent's final message when it finishes.
 
 ### 3. Run the bridge
 
@@ -255,6 +260,8 @@ A machine's **kit** is its agent environment, saved with every `agyh sync` / `ag
 | Skills you installed (`~/.claude/skills`, Codex's `~/.agents/skills`, …) | Each skill folder, as an encrypted archive named by its content fingerprint: the same skill on five machines is stored once, and only new or changed skills are uploaded. Dependencies a skill installs next to itself (`.venv`, `node_modules`, Playwright browsers…) are left out: a 1.4 GB skill folder backs up as 1.4 MB. |
 | Plugins | References only (id, version, where it came from). Plugins are reinstalled through their agent, never copied. Skills shipped inside plugins come back with the plugin. |
 | MCP servers | Every server entry exactly as each agent stores it, **tokens included**, encrypted with the vault key. |
+
+Project changes travel too. Deleting, renaming or merging a project, or removing a session from one, leaves a tombstone in the vault, so another machine (or the next sync) doesn't bring it back; the newest change wins, so recreating a project later works as expected. Sessions are never deleted by any of this.
 
 Snapshots are **per machine** (named by `sync.machine`, else the hostname): restoring brings back exactly the environment that machine had. `agyh sync status` lists every machine's snapshot.
 

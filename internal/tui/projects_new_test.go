@@ -93,3 +93,94 @@ func TestNewSessionPanel(t *testing.T) {
 		t.Fatalf("no agents: mode=%v status=%q", m3.mode, m3.status)
 	}
 }
+
+func typeText(m *Model, s string) { send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}) }
+
+func TestProjectActionsInPicker(t *testing.T) {
+	st := seeded(t, "claude", "agy")
+	ctx := context.Background()
+	a, _ := st.Resolve(ctx, "aaaaaaaa")
+	b, _ := st.Resolve(ctx, "bbbbbbbb")
+	st.AddToProject(ctx, "conecta-me", a, "")
+	st.AddToProject(ctx, "conectame", b, "")
+	m := New(ctx, st, Options{})
+	send(m, tea.WindowSizeMsg{Width: 120, Height: 30})
+	press(m, tea.KeyCtrlG)
+	pick := func(name string) {
+		for i, p := range m.projects {
+			if p.Name == name {
+				m.projCursor = i + 1
+			}
+		}
+	}
+
+	// merge conectame into conecta-me (tab completes the target)
+	pick("conectame")
+	typeText(m, "m")
+	typeText(m, "conecta-")
+	press(m, tea.KeyTab)
+	if m.prompt.Value() != "conecta-me" {
+		t.Fatalf("tab completion: %q", m.prompt.Value())
+	}
+	press(m, tea.KeyEnter)
+	if len(m.projects) != 1 || m.projects[0].Sessions != 2 || !strings.Contains(m.status, "moved 1 sessions") {
+		t.Fatalf("merge: %+v %q", m.projects, m.status)
+	}
+
+	// color cycles
+	pick("conecta-me")
+	before := m.projects[0].Color
+	typeText(m, "c")
+	if m.projects[0].Color == before || m.projects[0].Color == "" {
+		t.Fatalf("color: %q -> %q", before, m.projects[0].Color)
+	}
+
+	// rename
+	pick("conecta-me")
+	typeText(m, "r")
+	typeText(m, "conecta")
+	press(m, tea.KeyEnter)
+	if m.projects[0].Name != "conecta" {
+		t.Fatalf("rename: %+v %q", m.projects, m.status)
+	}
+
+	// delete asks first; n keeps it, y deletes it, sessions stay
+	pick("conecta")
+	typeText(m, "d")
+	if !strings.Contains(m.View(), "Its 2 sessions are kept") {
+		t.Fatalf("delete confirmation:\n%s", m.View())
+	}
+	typeText(m, "n")
+	if len(m.projects) != 1 {
+		t.Fatal("n must keep the project")
+	}
+	typeText(m, "d")
+	typeText(m, "y")
+	if len(m.projects) != 0 {
+		t.Fatalf("delete: %+v", m.projects)
+	}
+	if c, _ := st.Count(ctx); c["claude"]+c["agy"] != 2 {
+		t.Fatal("sessions must survive")
+	}
+}
+
+func TestSavePromptSteersAwayFromDuplicates(t *testing.T) {
+	st := seeded(t, "claude", "agy")
+	ctx := context.Background()
+	a, _ := st.Resolve(ctx, "aaaaaaaa")
+	st.AddToProject(ctx, "conecta-me", a, "")
+	m := New(ctx, st, Options{})
+	send(m, tea.WindowSizeMsg{Width: 120, Height: 30})
+	m.cursor = 1 // the agy session
+	press(m, tea.KeyCtrlP)
+	typeText(m, "conectame")
+	press(m, tea.KeyEnter)
+	if m.mode != modeProject || m.prompt.Value() != "conecta-me" || !strings.Contains(m.status, "looks like the existing conecta-me") {
+		t.Fatalf("guard: mode=%v value=%q status=%q", m.mode, m.prompt.Value(), m.status)
+	}
+	press(m, tea.KeyEnter)
+	ps, _ := st.Projects(ctx)
+	if len(ps) != 1 || ps[0].Sessions != 2 {
+		t.Fatalf("saved into the existing project: %+v", ps)
+	}
+}

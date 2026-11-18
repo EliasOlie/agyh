@@ -51,6 +51,22 @@ CREATE TABLE IF NOT EXISTS project_sessions (
 	PRIMARY KEY (project, agent, id)
 );
 CREATE INDEX IF NOT EXISTS project_sessions_session ON project_sessions(agent, id);
+-- Tombstones remember deletions, so the vault (which merges by union) can't
+-- bring a deleted project or a removed membership back. Newest change wins:
+-- a tombstone removes what was created before it; recreating clears it.
+CREATE TABLE IF NOT EXISTS project_tombstones (
+	name       TEXT PRIMARY KEY,
+	deleted_at INTEGER NOT NULL,
+	synced     INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS membership_tombstones (
+	project    TEXT NOT NULL,
+	agent      TEXT NOT NULL,
+	id         TEXT NOT NULL,
+	removed_at INTEGER NOT NULL,
+	synced     INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (project, agent, id)
+);
 CREATE TABLE IF NOT EXISTS pending_projects (
 	agent     TEXT NOT NULL,
 	workspace TEXT NOT NULL,

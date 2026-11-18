@@ -276,6 +276,11 @@ func (b *Bridge) save(ctx context.Context, m Markup, rest string) string {
 		return m.Escape(err.Error())
 	}
 	note := strings.Join(f[2:], " ")
+	var sim *store.ErrSimilarProject
+	if err := b.store.CheckNewProject(ctx, f[1]); errors.As(err, &sim) {
+		return fmt.Sprintf("Project %s looks like the existing %s. Use /save %s %s, or create %s from the terminal (agyh project new --force).",
+			m.Code(f[1]), m.Code(sim.Existing), sess.ShortID(), m.Escape(sim.Existing), m.Escape(f[1]))
+	}
 	if err := b.store.AddToProject(ctx, f[1], sess, note); err != nil {
 		return "Error: " + m.Escape(err.Error())
 	}

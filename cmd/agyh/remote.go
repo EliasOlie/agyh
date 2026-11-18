@@ -235,9 +235,14 @@ func installHooksCmd() *cobra.Command {
 			switch args[0] {
 			case "claude":
 				where = "~/.claude/settings.json (merge into the \"hooks\" key)"
+				// PreToolUse only enforces the local policy (fatal commands blocked
+				// even in auto mode); PermissionRequest asks your phone, and only
+				// when Claude itself would have asked you.
 				cfg = map[string]any{"hooks": map[string]any{
 					"PreToolUse": []any{map[string]any{"matcher": "Bash", "hooks": []any{map[string]any{
-						"type": "command", "command": "agyh hook pre-tool-use --agent claude", "timeout": 180}}}},
+						"type": "command", "command": "agyh hook pre-tool-use --agent claude --policy-only", "timeout": 10}}}},
+					"PermissionRequest": []any{map[string]any{"matcher": "*", "hooks": []any{map[string]any{
+						"type": "command", "command": "agyh hook permission-request", "timeout": 180}}}},
 					"Stop": []any{map[string]any{"hooks": []any{map[string]any{
 						"type": "command", "command": "agyh hook stop --agent claude", "timeout": 15}}}},
 				}}

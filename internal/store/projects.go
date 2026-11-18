@@ -43,6 +43,10 @@ func (s *Store) CreateProject(ctx context.Context, name, desc string) error {
 	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
 		return fmt.Errorf("project %q already exists", name)
 	}
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM project_tombstones WHERE name = ?`, name)
 	return err
 }
 
@@ -51,34 +55,50 @@ func (s *Store) EnsureProject(ctx context.Context, name string) error {
 	if err := ValidProjectName(name); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO projects (name, description, created_at) VALUES (?, '', ?)`,
+	res, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO projects (name, description, created_at) VALUES (?, '', ?)`,
 		name, time.Now().Unix())
-	return err
-}
-
-func (s *Store) DeleteProject(ctx context.Context, name string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM projects WHERE name = ?`, name)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+	if n, _ := res.RowsAffected(); n > 0 { // (re)created now: newer than any deletion
+		_, err = s.db.ExecContext(ctx, `DELETE FROM project_tombstones WHERE name = ?`, name)
 	}
-	return nil
+	return err
+}
+
+// DeleteProject removes a project and its memberships; sessions are kept.
+// A tombstone keeps the vault from bringing it back.
+func (s *Store) DeleteProject(ctx context.Context, name string) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE name = ?`, name)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return tombstoneProject(ctx, tx, name, time.Now())
+	})
 }
 
 func (s *Store) RenameProject(ctx context.Context, from, to string) error {
 	if err := ValidProjectName(to); err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE projects SET name = ? WHERE name = ?`, to, from)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE projects SET name = ?, created_at = ? WHERE name = ?`, to, time.Now().Unix(), from)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		// Other machines know the old name: it is gone, the new one is new.
+		if err := clearProjectTombstone(ctx, tx, to); err != nil {
+			return err
+		}
+		return tombstoneProject(ctx, tx, from, time.Now())
+	})
 }
 
 func (s *Store) AddToProject(ctx context.Context, project string, sess model.Session, note string) error {
@@ -89,19 +109,29 @@ func (s *Store) AddToProject(ctx context.Context, project string, sess model.Ses
 		INSERT INTO project_sessions (project, agent, id, note, added_at) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(project, agent, id) DO UPDATE SET note = CASE WHEN excluded.note <> '' THEN excluded.note ELSE note END`,
 		project, sess.Agent, sess.ID, note, time.Now().Unix())
+	if err != nil {
+		return err
+	}
+	// Added again by the user: newer than any earlier removal.
+	_, err = s.db.ExecContext(ctx, `DELETE FROM membership_tombstones WHERE project = ? AND agent = ? AND id = ?`, project, sess.Agent, sess.ID)
 	return err
 }
 
 func (s *Store) RemoveFromProject(ctx context.Context, project string, sess model.Session) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM project_sessions WHERE project = ? AND agent = ? AND id = ?`,
-		project, sess.Agent, sess.ID)
-	if err != nil {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `DELETE FROM project_sessions WHERE project = ? AND agent = ? AND id = ?`,
+			project, sess.Agent, sess.ID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO membership_tombstones (project, agent, id, removed_at, synced) VALUES (?, ?, ?, ?, 0)
+			ON CONFLICT(project, agent, id) DO UPDATE SET removed_at = excluded.removed_at, synced = 0`,
+			project, sess.Agent, sess.ID, time.Now().Unix())
 		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	})
 }
 
 func (s *Store) Projects(ctx context.Context) ([]Project, error) {

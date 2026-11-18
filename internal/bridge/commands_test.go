@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"github.com/EliasOlie/agyh/internal/model"
 	"regexp"
 	"strings"
 	"testing"
@@ -154,5 +155,20 @@ func TestNewWithEveryAgentAndProjectColors(t *testing.T) {
 	st.SetProjectColor(ctx, "pix", "red")
 	if out := b.Execute(ctx, m, "telegram", "/projects"); !strings.Contains(out, "🟥") {
 		t.Fatalf("/projects should show the project's color: %s", out)
+	}
+}
+
+func TestSaveSteersAwayFromDuplicates(t *testing.T) {
+	b, st, _, _ := newBridge(t, 5)
+	ctx := context.Background()
+	now := time.Now()
+	st.Upsert(ctx, model.Session{Agent: "claude", ID: "aaaa1111bbbb", Title: "x", Path: "/p", UpdatedAt: now, ModTime: now}, nil)
+	st.CreateProject(ctx, "conecta-me", "")
+	out := b.Execute(ctx, waMarkup{}, "telegram", "/save aaaa1111 conectame")
+	if !strings.Contains(out, "looks like the existing") || !strings.Contains(out, "conecta-me") {
+		t.Fatalf("/save similar: %s", out)
+	}
+	if ps, _ := st.Projects(ctx); len(ps) != 1 {
+		t.Fatalf("no duplicate may be created: %+v", ps)
 	}
 }

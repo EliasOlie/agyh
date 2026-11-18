@@ -5,6 +5,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -114,6 +115,7 @@ type Model struct {
 	colors     map[string]string // project -> stored color ("" = derived)
 	projects   []store.Project   // modeProjects
 	projCursor int               // 0 = all sessions, i = projects[i-1]
+	projAction string            // "", "rename", "merge" or "delete" on the selected project
 
 	newAgents  []string // agents installed on this machine
 	newAgent   int
@@ -371,8 +373,19 @@ func (m *Model) updateProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeList
 		m.search.Focus()
 		return m, nil
+	case "tab":
+		m.prompt.SetValue(m.completeProject(m.prompt.Value()))
+		m.prompt.CursorEnd()
+		return m, nil
 	case "enter":
 		name := strings.TrimSpace(m.prompt.Value())
+		var sim *store.ErrSimilarProject
+		if err := m.st.CheckNewProject(m.ctx, name); errors.As(err, &sim) {
+			m.prompt.SetValue(sim.Existing)
+			m.prompt.CursorEnd()
+			m.status = fmt.Sprintf("%s looks like the existing %s: enter to use it (or create %s with agyh project new --force)", name, sim.Existing, name)
+			return m, nil
+		}
 		if h := m.current; h != nil && name != "" {
 			if err := m.st.AddToProject(m.ctx, name, h.Session, ""); err != nil {
 				m.status = "✗ " + err.Error()
@@ -408,7 +421,135 @@ func (m *Model) openProjects() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) selectedProject() *store.Project {
+	if m.projCursor < 1 || m.projCursor > len(m.projects) {
+		return nil
+	}
+	return &m.projects[m.projCursor-1]
+}
+
+// reloadProjects refreshes the picker after a change, keeping the cursor near.
+func (m *Model) reloadProjects() {
+	m.projects, _ = m.st.Projects(m.ctx)
+	m.colors, _ = m.st.ProjectColors(m.ctx)
+	m.projCursor = min(m.projCursor, len(m.projects))
+	m.refresh()
+}
+
+func (m *Model) updateProjectAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	p := m.selectedProject()
+	if p == nil {
+		m.projAction = ""
+		return m, nil
+	}
+	if m.projAction == "delete" {
+		if strings.ToLower(msg.String()) == "y" {
+			if err := m.st.DeleteProject(m.ctx, p.Name); err != nil {
+				m.status = "✗ " + err.Error()
+			} else {
+				m.status = fmt.Sprintf("✓ deleted %s (its %d sessions are kept)", p.Name, p.Sessions)
+				if m.project == p.Name {
+					m.project = ""
+				}
+			}
+			m.reloadProjects()
+		}
+		m.projAction = ""
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc":
+		m.projAction = ""
+		return m, nil
+	case "tab":
+		m.prompt.SetValue(m.completeProject(m.prompt.Value()))
+		m.prompt.CursorEnd()
+		return m, nil
+	case "enter":
+		target := strings.TrimSpace(m.prompt.Value())
+		var err error
+		switch {
+		case target == "" || target == p.Name:
+		case m.projAction == "rename":
+			if err = m.st.RenameProject(m.ctx, p.Name, target); err == nil {
+				m.status = fmt.Sprintf("✓ renamed %s to %s", p.Name, target)
+				if m.project == p.Name {
+					m.project = target
+				}
+			}
+		case m.projAction == "merge":
+			var n int
+			if n, err = m.st.MergeProjects(m.ctx, p.Name, target); err == nil {
+				m.status = fmt.Sprintf("✓ moved %d sessions from %s into %s; %s deleted", n, p.Name, target, p.Name)
+				if m.project == p.Name {
+					m.project = target
+				}
+			}
+		}
+		if err != nil {
+			m.status = "✗ " + err.Error()
+		}
+		m.projAction = ""
+		m.reloadProjects()
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.prompt, cmd = m.prompt.Update(msg)
+	return m, cmd
+}
+
+// completeProject completes a prefix to an existing project name (tab).
+func (m *Model) completeProject(prefix string) string {
+	ps := m.projects
+	if ps == nil {
+		ps, _ = m.st.Projects(m.ctx)
+	}
+	key := store.ProjectKey(prefix)
+	for _, p := range ps {
+		if strings.HasPrefix(strings.ToLower(p.Name), strings.ToLower(prefix)) ||
+			(key != "" && strings.HasPrefix(store.ProjectKey(p.Name), key)) {
+			return p.Name
+		}
+	}
+	return prefix
+}
+
 func (m *Model) updateProjects(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.projAction != "" {
+		return m.updateProjectAction(msg)
+	}
+	switch msg.String() {
+	case "r", "m":
+		if p := m.selectedProject(); p != nil {
+			m.projAction = map[string]string{"r": "rename", "m": "merge"}[msg.String()]
+			m.prompt.Prompt = map[string]string{"r": "rename to: ", "m": "merge into: "}[msg.String()]
+			m.prompt.Placeholder = "project name · tab completes"
+			m.prompt.SetValue("")
+			m.prompt.Focus()
+			return m, textinput.Blink
+		}
+		return m, nil
+	case "d", "delete":
+		if m.selectedProject() != nil {
+			m.projAction = "delete"
+		}
+		return m, nil
+	case "c":
+		if p := m.selectedProject(); p != nil {
+			next := colors.Palette[0].Name
+			cur := colors.For(p.Name, p.Color).Name
+			for i, c := range colors.Palette {
+				if c.Name == cur {
+					next = colors.Palette[(i+1)%len(colors.Palette)].Name
+				}
+			}
+			if err := m.st.SetProjectColor(m.ctx, p.Name, next); err != nil {
+				m.status = "✗ " + err.Error()
+			}
+			m.reloadProjects()
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "esc", "q", "ctrl+g":
 		m.mode = modeList
@@ -536,7 +677,18 @@ func (m *Model) viewProjects() string {
 	if len(m.projects) == 0 {
 		sb.WriteString("\n" + mutedSt.Render("  no projects yet · ctrl+p on a session saves it into one") + "\n")
 	}
-	sb.WriteString("\n" + mutedSt.Render("↑/↓ · enter browse · esc back · change a color: agyh project color <name> <color>"))
+	if p := m.selectedProject(); p != nil && m.projAction != "" {
+		sb.WriteString("\n")
+		if m.projAction == "delete" {
+			sb.WriteString(selSt.Render(fmt.Sprintf("Delete project %s? Its %d sessions are kept. (y/N)", p.Name, p.Sessions)) + "\n")
+		} else {
+			sb.WriteString(m.prompt.View() + "\n")
+		}
+	}
+	if m.status != "" {
+		sb.WriteString("\n" + statusSt.Render(m.status))
+	}
+	sb.WriteString("\n" + mutedSt.Render("↑/↓ · enter browse · r rename · m merge into… · d delete · c color · esc back"))
 	return sb.String()
 }
 
@@ -576,6 +728,7 @@ func (m *Model) askProject() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.current = h
+	m.prompt.Prompt, m.prompt.Placeholder = "project: ", "name (created if new) · tab completes"
 	m.prompt.SetValue("")
 	m.prompt.Focus()
 	m.mode = modeProject

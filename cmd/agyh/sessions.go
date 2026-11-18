@@ -295,6 +295,11 @@ func (a *app) startSession(ctx context.Context, n NewSession) error {
 		if err != nil {
 			return err
 		}
+		var sim *store.ErrSimilarProject
+		if err := st.CheckNewProject(ctx, n.Project); errors.As(err, &sim) {
+			st.Close()
+			return fmt.Errorf("%w: use -p %s (or create %s first with agyh project new --force)", sim, sim.Existing, n.Project)
+		}
 		err = st.AddPendingProject(ctx, n.Agent, n.Dir, n.Project, time.Now())
 		st.Close()
 		if err != nil {
