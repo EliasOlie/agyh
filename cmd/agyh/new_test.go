@@ -24,8 +24,17 @@ func fakeAgents(t *testing.T, names ...string) {
 func TestNewStartsAnAgentAndJoinsTheProject(t *testing.T) {
 	home, _ := env(t)
 	fakeAgents(t, "claude", "agy")
-	ws := filepath.Join(home, "work", "api")
-	os.MkdirAll(ws, 0o755)
+	os.MkdirAll(filepath.Join(home, "work", "api"), 0o755)
+	// Started through a symlink (like macOS's /var -> /private/var): agyh must
+	// run in, and record, the resolved directory, as the agent itself will.
+	link := filepath.Join(home, "api-link")
+	if err := os.Symlink(filepath.Join(home, "work", "api"), link); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(t.TempDir())
 
 	var gotBin string
@@ -34,7 +43,7 @@ func TestNewStartsAnAgentAndJoinsTheProject(t *testing.T) {
 	t.Cleanup(func() { execFn = old })
 	execFn = func(bin string, argv []string) error { gotBin, gotArgv = bin, argv; return nil }
 
-	mustRun(t, "new", "agy", "-w", ws, "fix", "the", "build")
+	mustRun(t, "new", "agy", "-w", link, "fix", "the", "build")
 	if !strings.HasSuffix(gotBin, "/agy") || strings.Join(gotArgv, "|") != "agy|-i|fix the build" {
 		t.Fatalf("agy start: %s %q", gotBin, gotArgv)
 	}
@@ -43,7 +52,7 @@ func TestNewStartsAnAgentAndJoinsTheProject(t *testing.T) {
 	}
 
 	// claude, no prompt, inside a project: the session joins it once indexed.
-	mustRun(t, "new", "-w", ws, "-p", "pagamentos")
+	mustRun(t, "new", "-w", link, "-p", "pagamentos")
 	if strings.Join(gotArgv, "|") != "claude" {
 		t.Fatalf("claude start: %q", gotArgv)
 	}

@@ -290,6 +290,12 @@ func (a *app) startSession(ctx context.Context, n NewSession) error {
 	if _, err := exec.LookPath(argv[0]); err != nil {
 		return fmt.Errorf("%s is not installed or not in PATH", argv[0])
 	}
+	// Agents record the directory they run in with symlinks resolved (on
+	// macOS /var is /private/var): use the same form, or a pending project
+	// would never match the session.
+	if dir, err := filepath.EvalSymlinks(n.Dir); err == nil {
+		n.Dir = dir
+	}
 	if n.Project != "" {
 		st, err := a.open()
 		if err != nil {
