@@ -318,3 +318,43 @@ func TestNonLoopbackAddressRejected(t *testing.T) {
 		}
 	}
 }
+
+// slowChannel takes a while to send, like Telegram on a bad network.
+type slowChannel struct {
+	*fakeChannel
+	release chan struct{}
+}
+
+func (s *slowChannel) Send(ctx context.Context, text string) error {
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.fakeChannel.Send(ctx, text)
+}
+
+// The stop hook gives up after a few seconds; the notification must still
+// arrive, rendered from Markdown.
+func TestNotifyOutlivesTheHook(t *testing.T) {
+	b, _, srv, _ := newBridge(t, 5)
+	ch := &slowChannel{fakeChannel: newFake("telegram"), release: make(chan struct{})}
+	b.AddChannel(ch)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	cfg := config.Default()
+	cfg.Bridge.Addr, cfg.Bridge.Secret = strings.TrimPrefix(srv.URL, "http://"), "test-secret"
+	start := time.Now()
+	if err := NewClient(cfg).Notify(ctx, "✅ **claude** finished\n\n```go\nx := 1\n```", true); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 500*time.Millisecond {
+		t.Fatal("notify waited for the channel")
+	}
+	cancel() // the hook is gone
+	close(ch.release)
+	waitFor(t, func() bool { return ch.last() != "" })
+	if got := ch.last(); got != "✅ *claude* finished\n\n```\nx := 1\n```" {
+		t.Fatalf("rendered: %q", got)
+	}
+}

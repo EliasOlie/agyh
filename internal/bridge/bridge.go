@@ -292,12 +292,18 @@ func (b *Bridge) handleNotify(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "text required"})
 		return
 	}
-	b.Broadcast(r.Context(), func(m Markup) string {
-		if in.Markdown {
-			return m.Markdown(in.Text)
-		}
-		return m.Escape(in.Text)
-	})
+	// Deliver in the background: hooks wait only a few seconds, and a slow
+	// network to Telegram (and its retries) must not cancel the message.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		b.Broadcast(ctx, func(m Markup) string {
+			if in.Markdown {
+				return m.Markdown(in.Text)
+			}
+			return m.Escape(in.Text)
+		})
+	}()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
