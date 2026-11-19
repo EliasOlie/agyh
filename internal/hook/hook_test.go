@@ -90,3 +90,19 @@ func TestPermissionRequestParsingAndOutput(t *testing.T) {
 		t.Fatal("ask must print nothing so Claude shows its own prompt")
 	}
 }
+
+// Codex hooks send Claude Code's payload; Stop also carries the last reply.
+func TestParseCodex(t *testing.T) {
+	req, err := Parse("codex", strings.NewReader(`{"session_id":"019a","cwd":"/w","hook_event_name":"PermissionRequest",
+		"tool_name":"Bash","tool_input":{"command":"git push"},"permission_mode":"default"}`))
+	if err != nil || req.Agent != "codex" || req.Command != "git push" || req.SelfApproving() {
+		t.Fatalf("%+v %v", req, err)
+	}
+	req, err = Parse("codex", strings.NewReader(`{"session_id":"019a","hook_event_name":"Stop","last_assistant_message":"Done: **3 files**"}`))
+	if err != nil || req.LastMessage != "Done: **3 files**" {
+		t.Fatalf("%+v %v", req, err)
+	}
+	if !strings.Contains(string(Output("codex", policy.Deny, "no")), `"permissionDecision":"deny"`) {
+		t.Fatal("codex deny must use the PreToolUse hookSpecificOutput form")
+	}
+}

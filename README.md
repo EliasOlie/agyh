@@ -47,10 +47,20 @@ Agent CLIs keep history per tool and per folder. After a few weeks you have hund
 
 ## Install
 
-Requires Go 1.26+ (older Go downloads the right toolchain automatically).
+On Linux and macOS, the installer downloads the latest release, checks it against the release checksums (and its GitHub build attestation, when `gh` is logged in), puts `agyh` in `~/.local/bin` and wires it into the agents it finds (Claude Code, Antigravity, Codex):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/EliasOlie/agyh/main/install.sh | sh
+# options: sh -s -- --version v0.4.0 --bin-dir ~/bin --no-hooks --service
+```
+
+`--service` also runs the bridge as a user service (systemd on Linux, launchd on macOS). Running the installer again upgrades agyh and restarts a running bridge service.
+
+With Go 1.26+ (older Go downloads the right toolchain automatically), or on Windows:
 
 ```bash
 go install github.com/EliasOlie/agyh/cmd/agyh@latest
+agyh install-hooks --apply
 agyh --version
 ```
 
@@ -120,7 +130,7 @@ agyh new claude -w @pdv -p pagamentos               # …that joins a project
 | `agyh sync [status\|push\|pull\|restore\|migrate]` | Synchronize or restore sessions with encrypted cloud vault; `migrate` re-encrypts sessions written by agyh ≤ 0.2 with the vault's own key. |
 | `agyh connect telegram\|whatsapp` | Pair a chat channel. |
 | `agyh bridge` | Run the daemon that connects hooks and chat. |
-| `agyh install-hooks claude\|agy` | Print the hook config to paste into your agent. |
+| `agyh install-hooks [claude\|agy\|codex] [--apply]` | Print the hook config, or write it into the agents' settings (backup kept; broken hooks removed). |
 | `agyh skills` | Agent Skills installed in each agent, grouped by name, with differing copies flagged. `--agent`, `--all` (include skills bundled with the agents), `--json`. |
 | `agyh skills link <skill>… --to <agents>` | Copy a skill into other agents (e.g. from Antigravity into Claude Code and Codex), or `--all --from kit` after a restore. Opt-in, tracked, never overwrites your files. `--dry-run` previews. |
 | `agyh skills unlink <skill>…` / `agyh skills links` | Remove skills agyh installed (only its own, unedited copies) / list them. |
@@ -172,12 +182,22 @@ You then talk to agyh in the **"Message yourself"** chat; every other chat is ig
 
 ### 2. Install the hooks
 
+The installer already did this. Otherwise:
+
 ```bash
-agyh install-hooks claude   # paste into ~/.claude/settings.json
-agyh install-hooks agy      # paste into your Antigravity hooks file
+agyh install-hooks --apply          # every agent found: Claude Code, Antigravity, Codex
+agyh install-hooks codex            # or just print one agent's config, to paste yourself
 ```
 
-For Claude Code this adds three hooks:
+`--apply` only replaces agyh's own hooks and keeps everything else; the previous file is saved as `*.agyh-backup`. It also removes hooks that run a program that no longer exists (a leftover hook like that makes the agent refuse every command it matches); `agyh doctor` reports them too.
+
+| Agent | File | Hooks |
+|---|---|---|
+| Claude Code | `~/.claude/settings.json` | PermissionRequest, PreToolUse (policy only), Stop |
+| Codex | `~/.codex/hooks.json` | the same three; Codex runs new hooks only after you trust them with `/hooks` |
+| Antigravity | `~/.agents/hooks.json` | PreToolUse on `run_command` (phone and terminal race), Stop |
+
+For Claude Code (and Codex) these are:
 
 - `PermissionRequest`: when Claude is about to **ask you** for permission (and only then), the request goes to your phone. In Claude's `auto`, `dontAsk` and `bypassPermissions` modes agyh stays out of the way. Without an answer in time (or with no bridge running), Claude shows its own prompt as usual.
 - `PreToolUse` on `Bash`, policy only: fatal commands are blocked in every mode, auto included, and read-only ones are let through. It never asks.

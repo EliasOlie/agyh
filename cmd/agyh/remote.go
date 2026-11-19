@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,6 +19,8 @@ import (
 
 	"github.com/EliasOlie/agyh/internal/bridge"
 	"github.com/EliasOlie/agyh/internal/config"
+	"github.com/EliasOlie/agyh/internal/hook"
+	"github.com/EliasOlie/agyh/internal/hookinstall"
 	"github.com/EliasOlie/agyh/internal/index"
 	"github.com/EliasOlie/agyh/internal/policy"
 	"github.com/EliasOlie/agyh/internal/source"
@@ -224,43 +228,128 @@ func displayName(u bridge.TgUser) string {
 }
 
 func installHooksCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:       "install-hooks <claude|agy>",
-		Short:     "Print the hook configuration to paste into your agent's settings",
-		Args:      cobra.ExactArgs(1),
-		ValidArgs: []string{"claude", "agy"},
+	var apply bool
+	var bin string
+	cmd := &cobra.Command{
+		Use:   "install-hooks [claude|agy|codex|all]",
+		Short: "Install agyh's hooks into your agents (or print them)",
+		Long: `Without --apply, prints the hook configuration for each agent. With
+--apply, writes it into the agent's settings: earlier agyh hooks are
+replaced, hooks that run a program that no longer exists are removed, every
+other setting is kept and the previous file is saved as *.agyh-backup.
+
+With no agent (or "all"), every agent found on this machine.
+
+  claude  ~/.claude/settings.json
+  agy     ~/.agents/hooks.json (and broken hooks in ~/.gemini/config/hooks.json)
+  codex   ~/.codex/hooks.json  (Codex asks you to trust new hooks: run /hooks in codex)`,
+		Args:      cobra.MaximumNArgs(1),
+		ValidArgs: append([]string{"all"}, hookinstall.Agents...),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var cfg any
-			where := ""
-			switch args[0] {
-			case "claude":
-				where = "~/.claude/settings.json (merge into the \"hooks\" key)"
-				// PreToolUse only enforces the local policy (fatal commands blocked
-				// even in auto mode); PermissionRequest asks your phone, and only
-				// when Claude itself would have asked you.
-				cfg = map[string]any{"hooks": map[string]any{
-					"PreToolUse": []any{map[string]any{"matcher": "Bash", "hooks": []any{map[string]any{
-						"type": "command", "command": "agyh hook pre-tool-use --agent claude --policy-only", "timeout": 10}}}},
-					"PermissionRequest": []any{map[string]any{"matcher": "*", "hooks": []any{map[string]any{
-						"type": "command", "command": "agyh hook permission-request", "timeout": 180}}}},
-					"Stop": []any{map[string]any{"hooks": []any{map[string]any{
-						"type": "command", "command": "agyh hook stop --agent claude", "timeout": 15}}}},
-				}}
-			case "agy":
-				where = "your Antigravity hooks file (e.g. ~/.agents/hooks.json)"
-				cfg = map[string]any{
-					"agyh-permission": map[string]any{"PreToolUse": []any{map[string]any{"matcher": "run_command",
-						"hooks": []any{map[string]any{"type": "command", "command": "agyh hook pre-tool-use --agent agy", "timeout": 180}}}}},
-					"agyh-stop": map[string]any{"Stop": []any{map[string]any{
-						"type": "command", "command": "agyh hook stop --agent agy", "timeout": 15}}},
+			out := cmd.OutOrStdout()
+			paths := hookinstall.DefaultPaths()
+			var agents []string
+			switch {
+			case len(args) == 1 && args[0] != "all":
+				if !slices.Contains(hookinstall.Agents, args[0]) {
+					return fmt.Errorf("supported agents: %s", strings.Join(hookinstall.Agents, ", "))
 				}
+				agents = []string{args[0]}
 			default:
-				return errors.New("supported agents: claude, agy")
+				for _, a := range hookinstall.Agents {
+					if paths.Detected(a) {
+						agents = append(agents, a)
+					}
+				}
+				if len(agents) == 0 {
+					return errors.New("no agent found (claude, agy, codex): name one to install anyway")
+				}
 			}
-			b, _ := json.MarshalIndent(cfg, "", "  ")
-			fmt.Fprintf(cmd.OutOrStdout(), "// Add to %s\n%s\n", where, b)
+			if bin == "" {
+				bin = selfPath()
+			}
+			if !apply {
+				for _, a := range agents {
+					snippet, _ := hookinstall.Snippet(a, bin)
+					b, _ := json.MarshalIndent(snippet, "", "  ")
+					fmt.Fprintf(out, "// %s: merge into %s\n%s\n\n", a, hook.ShortenHome(paths.File(a)), b)
+				}
+				fmt.Fprintln(out, "// Or let agyh write it: agyh install-hooks --apply")
+				printStale(out, paths, true)
+				return nil
+			}
+			for _, a := range agents {
+				res, err := hookinstall.Install(paths, a, bin)
+				if err != nil {
+					return fmt.Errorf("%s: %w", a, err)
+				}
+				fmt.Fprintf(out, "✓ %-6s hooks in %s", a, hook.ShortenHome(res.File))
+				if res.Backup != "" {
+					fmt.Fprintf(out, " (previous file: %s)", hook.ShortenHome(res.Backup))
+				}
+				fmt.Fprintln(out)
+				for _, s := range res.Removed {
+					fmt.Fprintf(out, "  removed a broken hook: %s\n", s.Command)
+				}
+				if a == "agy" {
+					removed, backup, err := hookinstall.RemoveStale(paths, paths.AgyLegacy)
+					if err != nil {
+						return err
+					}
+					for _, s := range removed {
+						fmt.Fprintf(out, "  removed a broken hook from %s: %s\n", hook.ShortenHome(s.File), s.Command)
+					}
+					if backup != "" {
+						fmt.Fprintf(out, "  (previous file: %s)\n", hook.ShortenHome(backup))
+					}
+				}
+				if a == "codex" {
+					fmt.Fprintln(out, "  Codex runs new hooks only after you trust them: open codex and run /hooks.")
+				}
+			}
+			printStale(out, paths, false)
+			fmt.Fprintln(out, "\nStart a new agent session for the hooks to apply.")
 			return nil
 		},
+	}
+	cmd.Flags().BoolVar(&apply, "apply", false, "write the hooks into the agents' settings")
+	cmd.Flags().StringVar(&bin, "bin", "", "agyh binary the hooks call (default: this one)")
+	return cmd
+}
+
+// selfPath is this binary's absolute path: hooks run with the agent's PATH,
+// which often lacks ~/.local/bin or ~/go/bin.
+func selfPath() string {
+	p, err := os.Executable()
+	if err != nil {
+		return "agyh"
+	}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
+	}
+	if strings.Contains(p, "go-build") { // `go run`: the binary is temporary
+		return "agyh"
+	}
+	return p
+}
+
+// printStale warns about hooks that run a missing program: the agent fails
+// every tool call they match.
+func printStale(out io.Writer, paths hookinstall.Paths, suggest bool) {
+	stale, err := hookinstall.FindStale(paths)
+	if err != nil {
+		fmt.Fprintf(out, "\n⚠ %v\n", err)
+		return
+	}
+	if len(stale) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "\n⚠ Hooks that run a program that no longer exists (the agent fails the tool calls they match):")
+	for _, s := range stale {
+		fmt.Fprintf(out, "  %s: %s\n", hook.ShortenHome(s.File), s.Command)
+	}
+	if suggest {
+		fmt.Fprintln(out, "  Remove them with: agyh install-hooks --apply")
 	}
 }
 
@@ -302,6 +391,9 @@ func (a *app) doctorCmd() *cobra.Command {
 			fmt.Fprintf(out, "  %s whatsapp\n", ok(cfg.WhatsApp.Enabled && waErr == nil))
 			fmt.Fprintf(out, "  %s cloud vault (%s)\n", ok(cfg.Sync.Enabled), cfg.Sync.Endpoint)
 			fmt.Fprintf(out, "  %s bridge running on %s\n", ok(cfg.Bridge.Secret != "" && bridge.NewClient(cfg).Available(ctx)), cfg.Bridge.Addr)
+			stale, _ := hookinstall.FindStale(hookinstall.DefaultPaths())
+			fmt.Fprintf(out, "Hooks\n  %s no broken agent hooks\n", ok(len(stale) == 0))
+			printStale(out, hookinstall.DefaultPaths(), true)
 			return nil
 		},
 	}
