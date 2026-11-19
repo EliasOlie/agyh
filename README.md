@@ -235,11 +235,27 @@ Add your own patterns in the config: `"policy": {"safe": ["^make\\s+test(\\s|$)"
 | `/ws` | Workspaces `/new` may use |
 | `/pending` · `/pendentes` | Pending approvals / Aprovações pendentes |
 | `/auto [off <id>]` | Autonomous sessions / Sessões em modo autônomo |
+| `/get <path>` · `/arquivo` | Send me a file from this machine / Receber um arquivo desta máquina |
+| *(a photo or file)* | Saved to the inbox; the next `/new` takes it along / Salvo na caixa de entrada; o próximo `/new` leva junto |
 | `/sync` · `/sincronizar` | Synchronize with cloud vault / Sincronizar com vault |
 | `/start` · `/ajuda` · `/help` | Interactive onboarding & command guide |
 | `s <id>` · `y` · `sim` · `allow` | Allow / Permitir comando |
 | `n <id>` · `nao` · `rejeitar` · `deny` | Deny / Rejeitar comando |
 | `a <id>` · `auto` · `sempre` | Allow whole session (autonomous mode) ⚡ |
+
+### Files, both ways
+
+**To your phone.** `agyh send <file>... [-m caption]` sends files to every connected chat (Telegram up to 50 MB, WhatsApp up to 100 MB). `install-hooks --apply` also installs the **agyh-send** skill for Claude Code and Codex (and the bridge offers it to Antigravity), so agents use it on their own: *"generate the brand manual as a PDF and send it to my phone"*. From the phone, `/get <path>` asks for a file.
+
+| File | What happens |
+|---|---|
+| Inside the current workspace, a configured workspace, the temp dir or `files.allow` | Sent right away |
+| Anywhere else | Waits for your approval on the phone (one approval per `agyh send`) |
+| A secret: keys (`*.pem`, `id_ed25519`…), `.env*` (not `.env.example`), credential files, anything under `.ssh`, `.aws`, `.git`, `.kube`…, agyh's own config and data | **Never sent**, whoever asks, symlinks included |
+
+Telegram bot chats are not end-to-end encrypted: what you send passes through Telegram's servers, which is why secrets are refused outright.
+
+**From your phone.** Send a photo, a PDF or any file to the bot (or to yourself on WhatsApp). agyh saves it, never executed and readable only by you, in `~/.local/share/agyh/inbox/<date>/` and replies with the path. Send `/new <prompt>` within 15 minutes and the file goes along (Claude Code also gets `--add-dir` for that folder), or put `/new …` in the file's caption to do both at once. Telegram lets bots download files up to 20 MB.
 
 ## Cloud Vault & Disaster Recovery
 
@@ -310,6 +326,7 @@ agyh can approve shell commands, so it is built to fail closed:
 - The bridge re-checks the policy itself, so even a misconfigured hook or autonomous session cannot get a fatal command approved.
 - The bot token never appears in errors or logs. Network errors from the Bot API are stripped of the URL.
 - Agent data is opened **read-only** (`mode=ro` for SQLite). agyh writes its own files (the index, the kit under `~/.local/share/agyh/kit/`) and, **only if you enable `"manage_agents": true`**, skill folders and MCP servers inside agents' configuration (`agyh skills link/install`, `agyh mcp apply`, and bridge propagation you approve on chat). It never touches a skill folder or MCP server it did not create, nor one it created that you edited since; every change is recorded in `~/.local/share/agyh/links.json` and can be undone (`agyh skills unlink`, `agyh mcp remove`). Claude Code's config is only changed through its own CLI.
+- `agyh send` and `/get` refuse secrets (keys, `.env`, credential files, `.ssh`/`.aws`/`.git`, agyh's config and data) after resolving symlinks; files outside the workspaces need your approval. Files from the phone are saved with a sanitized name, mode `0600`, never executed.
 - The vault holds your **MCP tokens** (encrypted): whoever has the bucket *and* your passphrase has them too. Use a strong passphrase; `"kit": false` keeps them out of the vault.
 
 ## Configuration
@@ -328,6 +345,7 @@ agyh can approve shell commands, so it is built to fail closed:
   "auto_propagate": false,
   "catalogs": ["github:owner/marketplace-repo"],
   "policy": { "safe": [], "fatal": [] },
+  "files": { "max_mb": 50, "allow": ["/home/you/Documents/exports"] },
   "sync": {
     "enabled": true,
     "endpoint": "https://s3.example.com",

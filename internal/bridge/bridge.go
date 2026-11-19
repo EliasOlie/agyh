@@ -66,6 +66,11 @@ type Bridge struct {
 	ledgerPath, propagationPath string
 	propagating                 sync.Mutex
 
+	// Files: received ones land in inbox; protected dirs are never sent from.
+	inbox     string
+	protected []string
+	attached  attachments
+
 	mu       sync.RWMutex
 	channels []Channel
 }
@@ -82,6 +87,10 @@ type Options struct {
 	Homes           func() []agentkit.Home
 	LedgerPath      string
 	PropagationPath string
+	// Inbox receives files sent from the phone. Protected directories
+	// (agyh's config and data) are never sent from, the inbox excepted.
+	Inbox     string
+	Protected []string
 }
 
 func New(o Options) *Bridge {
@@ -98,6 +107,7 @@ func New(o Options) *Bridge {
 		log: o.Logger, runner: o.Runner}
 	b.vaultSync = b.runVaultSync
 	b.homes, b.ledgerPath, b.propagationPath = o.Homes, o.LedgerPath, o.PropagationPath
+	b.inbox, b.protected = o.Inbox, o.Protected
 	if b.homes == nil {
 		b.homes = agentkit.All
 	}
@@ -178,6 +188,7 @@ func (b *Bridge) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/approvals", b.handleApproval)
 	mux.HandleFunc("POST /v1/approvals/{id}/decision", b.handleExternalDecision)
 	mux.HandleFunc("POST /v1/notify", b.handleNotify)
+	mux.HandleFunc("POST /v1/files", b.handleFiles)
 	return b.auth(mux)
 }
 

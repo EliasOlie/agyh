@@ -49,6 +49,23 @@ type Sync struct {
 	Kit *bool `json:"kit,omitempty"`
 }
 
+// Files configures sending files to and from the phone.
+type Files struct {
+	// MaxMB caps a file in either direction (default 50, Telegram's limit).
+	MaxMB int `json:"max_mb,omitempty"`
+	// Allow lists extra directories whose files agents may send without
+	// asking (workspaces and the temp dir always are).
+	Allow []string `json:"allow,omitempty"`
+}
+
+// MaxBytes is MaxMB in bytes.
+func (f Files) MaxBytes() int64 {
+	if f.MaxMB <= 0 {
+		return 50 << 20
+	}
+	return int64(f.MaxMB) << 20
+}
+
 // KitEnabled reports whether syncs include the agent kit (default: yes).
 func (s Sync) KitEnabled() bool { return s.Kit == nil || *s.Kit }
 
@@ -58,6 +75,7 @@ type Config struct {
 	WhatsApp WhatsApp `json:"whatsapp"`
 	Policy   Policy   `json:"policy"`
 	Sync     Sync     `json:"sync"`
+	Files    Files    `json:"files,omitzero"`
 	// ApprovalTimeoutSec is how long a hook waits for a remote decision.
 	ApprovalTimeoutSec int `json:"approval_timeout_sec"`
 	// Runners start a new headless session from chat (/new). "{prompt}" is replaced.

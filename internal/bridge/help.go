@@ -22,6 +22,8 @@ func (b *Bridge) onboarding(m Markup) string {
 	sb.WriteString("• " + m.Code("/ver <id>") + " ou " + m.Code("/show <id>") + " — Detalhes e mensagens da conversa\n")
 	sb.WriteString("• " + m.Code("/novo [agent] <prompt>") + " ou " + m.Code("/new ...") + " — Iniciar tarefa em background\n")
 	sb.WriteString("• " + m.Code("/projetos") + " ou " + m.Code("/projects") + " — Listar seus projetos organizados\n")
+	sb.WriteString("• " + m.Code("/arquivo <caminho>") + " ou " + m.Code("/get <path>") + " — Receber um arquivo desta máquina\n")
+	sb.WriteString("• 📎 Envie uma foto ou arquivo aqui: ele é salvo e o próximo " + m.Code("/novo") + " leva junto\n")
 	sb.WriteString("• " + m.Code("/sync") + " — Sincronizar com o Cloud Vault criptografado\n")
 	sb.WriteString("• " + m.Code("/ajuda") + " ou " + m.Code("/help") + " — Ver todos os comandos\n\n")
 	sb.WriteString("💡 Dica: Envie " + m.Code("/sessoes") + " agora para ver suas sessões recentes!")

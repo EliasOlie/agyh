@@ -57,7 +57,9 @@ func (a *app) bridgeCmd() *cobra.Command {
 			b := bridge.New(bridge.Options{Config: cfg, Store: st, Policy: pol, Logger: log,
 				StatePath:       filepath.Join(store.DataDir(), "bridge-state.json"),
 				LedgerPath:      ledgerPath(),
-				PropagationPath: filepath.Join(store.DataDir(), "propagation.json")})
+				PropagationPath: filepath.Join(store.DataDir(), "propagation.json"),
+				Inbox:           filepath.Join(store.DataDir(), "inbox"),
+				Protected:       []string{config.Dir(), store.DataDir()}})
 
 			if cfg.Telegram.Token != "" && cfg.Telegram.ChatID != 0 {
 				b.AddChannel(bridge.NewTelegram(bridge.NewTelegramClient(cfg.Telegram.Token), cfg.Telegram.ChatID))
@@ -242,7 +244,11 @@ With no agent (or "all"), every agent found on this machine.
 
   claude  ~/.claude/settings.json
   agy     ~/.agents/hooks.json (and broken hooks in ~/.gemini/config/hooks.json)
-  codex   ~/.codex/hooks.json  (Codex asks you to trust new hooks: run /hooks in codex)`,
+  codex   ~/.codex/hooks.json  (Codex asks you to trust new hooks: run /hooks in codex)
+
+--apply also installs the agyh-send skill (how to send files to your phone)
+for Claude Code and Codex; the bridge's skill propagation offers it to
+Antigravity. A copy you edited is left alone.`,
 		Args:      cobra.MaximumNArgs(1),
 		ValidArgs: append([]string{"all"}, hookinstall.Agents...),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -305,6 +311,12 @@ With no agent (or "all"), every agent found on this machine.
 				}
 				if a == "codex" {
 					fmt.Fprintln(out, "  Codex runs new hooks only after you trust them: open codex and run /hooks.")
+				}
+				// The skill that teaches the agent `agyh send` (files to your phone).
+				if p, status, err := hookinstall.InstallSkill(paths, a); err != nil {
+					fmt.Fprintf(out, "  ! skill %s: %v\n", hookinstall.SkillName, err)
+				} else if p != "" {
+					fmt.Fprintf(out, "  skill %s: %s (%s)\n", hookinstall.SkillName, status, hook.ShortenHome(p))
 				}
 			}
 			printStale(out, paths, false)

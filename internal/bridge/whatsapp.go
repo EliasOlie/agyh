@@ -1,11 +1,13 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -138,6 +140,14 @@ func (w *WhatsApp) Run(ctx context.Context, b *Bridge) error {
 		if ours {
 			return
 		}
+		if in, ok := w.incoming(msg); ok {
+			go func() {
+				fctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+				defer cancel()
+				b.HandleFile(fctx, w, in)
+			}()
+			return
+		}
 		text := msg.Message.GetConversation()
 		if text == "" {
 			text = msg.Message.GetExtendedTextMessage().GetText()
@@ -181,6 +191,68 @@ func (w *WhatsApp) Send(ctx context.Context, text string) error {
 		w.sent[resp.ID] = true
 		w.mu.Unlock()
 	}
+	return nil
+}
+
+// incoming turns a media message from your self-chat into a file to save.
+func (w *WhatsApp) incoming(msg *events.Message) (Incoming, bool) {
+	m := msg.Message
+	var dl whatsmeow.DownloadableMessage
+	in := Incoming{}
+	switch {
+	case m.GetDocumentMessage() != nil:
+		d := m.GetDocumentMessage()
+		dl, in = d, Incoming{Name: d.GetFileName(), Mime: d.GetMimetype(), Size: int64(d.GetFileLength()), Caption: d.GetCaption()}
+	case m.GetImageMessage() != nil:
+		d := m.GetImageMessage()
+		dl, in = d, Incoming{Mime: d.GetMimetype(), Size: int64(d.GetFileLength()), Caption: d.GetCaption()}
+	case m.GetVideoMessage() != nil:
+		d := m.GetVideoMessage()
+		dl, in = d, Incoming{Mime: d.GetMimetype(), Size: int64(d.GetFileLength()), Caption: d.GetCaption()}
+	case m.GetAudioMessage() != nil:
+		d := m.GetAudioMessage()
+		dl, in = d, Incoming{Mime: d.GetMimetype(), Size: int64(d.GetFileLength())}
+	default:
+		return Incoming{}, false
+	}
+	in.Open = func(ctx context.Context) (io.ReadCloser, error) {
+		data, err := w.client.Download(ctx, dl)
+		if err != nil {
+			return nil, err
+		}
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+	return in, true
+}
+
+// MaxFileBytes: WhatsApp takes documents up to 100 MB (agyh's files.max_mb still applies).
+func (w *WhatsApp) MaxFileBytes() int64 { return 100 << 20 }
+
+// SendFile sends any file as a document, so photos keep their quality.
+func (w *WhatsApp) SendFile(ctx context.Context, f OutFile) error {
+	data, err := os.ReadFile(f.Path)
+	if err != nil {
+		return err
+	}
+	up, err := w.client.Upload(ctx, data, whatsmeow.MediaDocument)
+	if err != nil {
+		return err
+	}
+	doc := &waE2E.DocumentMessage{
+		URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath), MediaKey: up.MediaKey,
+		FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256, FileLength: proto.Uint64(up.FileLength),
+		Mimetype: proto.String(f.Mime), FileName: proto.String(f.Name), Title: proto.String(f.Name),
+	}
+	if c := strings.TrimSpace(f.Caption); c != "" {
+		doc.Caption = proto.String(c)
+	}
+	resp, err := w.client.SendMessage(ctx, w.self, &waE2E.Message{DocumentMessage: doc})
+	if err != nil {
+		return err
+	}
+	w.mu.Lock()
+	w.sent[resp.ID] = true
+	w.mu.Unlock()
 	return nil
 }
 

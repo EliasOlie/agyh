@@ -153,3 +153,38 @@ func TestQuoteBinWithSpaces(t *testing.T) {
 		t.Fatalf("%s", b)
 	}
 }
+
+// agyh updates its own copy of the skill, never one the user edited.
+func TestSendSkill(t *testing.T) {
+	p := testPaths(t)
+	path, status, err := InstallSkill(p, "claude")
+	if err != nil || status != "installed" || path != filepath.Join(p.Home, ".claude", "skills", "agyh-send", "SKILL.md") {
+		t.Fatalf("%s %s %v", path, status, err)
+	}
+	if !strings.Contains(string(mustRead(t, path)), "agyh send") {
+		t.Fatal("skill body")
+	}
+	if _, status, _ := InstallSkill(p, "claude"); status != "up to date" {
+		t.Fatalf("second run: %s", status)
+	}
+	// An older agyh copy is updated…
+	os.WriteFile(path, []byte("old agyh text"), 0o644)
+	os.WriteFile(filepath.Join(filepath.Dir(path), ".agyh-digest"), []byte(digest([]byte("old agyh text"))+"\n"), 0o644)
+	if _, status, _ := InstallSkill(p, "claude"); status != "updated" {
+		t.Fatalf("own copy: %s", status)
+	}
+	// …a copy the user edited is not.
+	os.WriteFile(path, append(mustRead(t, path), []byte("\nmy note\n")...), 0o644)
+	if _, status, _ := InstallSkill(p, "claude"); !strings.HasPrefix(status, "kept") {
+		t.Fatalf("edited copy: %s", status)
+	}
+	if !strings.Contains(string(mustRead(t, path)), "my note") {
+		t.Fatal("user edit lost")
+	}
+	if path, _, _ := InstallSkill(p, "agy"); path != "" {
+		t.Fatal("agy has no plain skills folder: propagation offers it there")
+	}
+	if path, _, _ := InstallSkill(p, "codex"); !strings.HasSuffix(path, filepath.Join(".agents", "skills", "agyh-send", "SKILL.md")) {
+		t.Fatalf("codex: %s", path)
+	}
+}
