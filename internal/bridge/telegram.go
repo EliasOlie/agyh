@@ -7,10 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/EliasOlie/agyh/internal/chatfmt"
 	"github.com/EliasOlie/agyh/internal/model"
 	"github.com/EliasOlie/agyh/internal/policy"
 )
@@ -79,6 +84,39 @@ type tgMessage struct {
 	Chat      tgChat `json:"chat"`
 	Text      string `json:"text"`
 	From      TgUser `json:"from"`
+	// Files sent from the phone.
+	Caption  string   `json:"caption"`
+	Document *tgFile  `json:"document"`
+	Photo    []tgFile `json:"photo"` // sizes, smallest first
+	Video    *tgFile  `json:"video"`
+	Audio    *tgFile  `json:"audio"`
+	Voice    *tgFile  `json:"voice"`
+}
+
+type tgFile struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name"`
+	MimeType string `json:"mime_type"`
+	FileSize int64  `json:"file_size"`
+}
+
+// media is the file attached to a message, if any (photos: the largest size).
+func (m *tgMessage) media() *tgFile {
+	switch {
+	case m.Document != nil:
+		return m.Document
+	case len(m.Photo) > 0:
+		p := m.Photo[len(m.Photo)-1]
+		p.MimeType = "image/jpeg"
+		return &p
+	case m.Video != nil:
+		return m.Video
+	case m.Audio != nil:
+		return m.Audio
+	case m.Voice != nil:
+		return m.Voice
+	}
+	return nil
 }
 
 type tgCallback struct {
@@ -91,6 +129,97 @@ type TgUpdate struct {
 	UpdateID int64       `json:"update_id"`
 	Message  *tgMessage  `json:"message"`
 	Callback *tgCallback `json:"callback_query"`
+}
+
+// tgDownloadLimit: bots can't download larger files from Telegram.
+const tgDownloadLimit = 20 << 20
+
+// Download fetches a file sent to the bot.
+func (c *TelegramClient) Download(ctx context.Context, fileID string) (io.ReadCloser, error) {
+	var f struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := c.Call(ctx, "getFile", map[string]any{"file_id": fileID}, &f); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/file/bot"+c.Token+"/"+f.FilePath, nil)
+	if err != nil {
+		return nil, errors.New("telegram download: bad file path")
+	}
+	resp, err := c.transfers().Do(req)
+	if err != nil {
+		return nil, errors.New("telegram download: request failed") // the URL holds the token
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("telegram download: HTTP %d", resp.StatusCode)
+	}
+	return resp.Body, nil
+}
+
+// Upload sends a file with a multipart request, streaming it from disk.
+func (c *TelegramClient) Upload(ctx context.Context, method string, fields map[string]string, field, name, path string) error {
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	go func() {
+		err := func() error {
+			for k, v := range fields {
+				if err := mw.WriteField(k, v); err != nil {
+					return err
+				}
+			}
+			part, err := mw.CreateFormFile(field, name)
+			if err != nil {
+				return err
+			}
+			f, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			if _, err := io.Copy(part, f); err != nil {
+				return err
+			}
+			return mw.Close()
+		}()
+		pw.CloseWithError(err)
+	}()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/bot"+c.Token+"/"+method, pr)
+	if err != nil {
+		pr.Close()
+		return fmt.Errorf("telegram %s: bad request", method)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := c.transfers().Do(req)
+	if err != nil {
+		pr.Close()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("telegram %s: upload failed", method) // the URL holds the token
+	}
+	defer resp.Body.Close()
+	var r tgResponse
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return fmt.Errorf("telegram %s: bad response (HTTP %d)", method, resp.StatusCode)
+	}
+	if !r.OK {
+		return fmt.Errorf("telegram %s: %s", method, r.Description)
+	}
+	return nil
+}
+
+// transfers is an HTTP client for big files: no overall timeout (the
+// caller's context bounds it), unlike the 70 s one for API calls.
+func (c *TelegramClient) transfers() *http.Client {
+	if c.HTTP != nil && c.HTTP.Timeout == 0 {
+		return c.HTTP
+	}
+	tr := http.DefaultTransport
+	if c.HTTP != nil && c.HTTP.Transport != nil {
+		tr = c.HTTP.Transport
+	}
+	return &http.Client{Transport: tr}
 }
 
 func (c *TelegramClient) GetMe(ctx context.Context) (TgUser, error) {
@@ -149,9 +278,11 @@ func (t *Telegram) Markup() Markup { return tgMarkup{} }
 
 type tgMarkup struct{}
 
-func (tgMarkup) Bold(s string) string   { return "<b>" + s + "</b>" }
-func (tgMarkup) Code(s string) string   { return "<code>" + html.EscapeString(s) + "</code>" }
-func (tgMarkup) Escape(s string) string { return html.EscapeString(s) }
+func (tgMarkup) Bold(s string) string      { return "<b>" + s + "</b>" }
+func (tgMarkup) Code(s string) string      { return "<code>" + html.EscapeString(s) + "</code>" }
+func (tgMarkup) Escape(s string) string    { return html.EscapeString(s) }
+func (tgMarkup) Markdown(md string) string { return chatfmt.Telegram(md) }
+func (tgMarkup) Pre(s, lang string) string { return chatfmt.TelegramPre(s, lang) }
 
 func (t *Telegram) Run(ctx context.Context, b *Bridge) error {
 	cmds := make([]map[string]string, 0, len(Commands))
@@ -193,6 +324,10 @@ func (t *Telegram) handle(ctx context.Context, b *Bridge, u TgUpdate) {
 			b.log.Warn("telegram message from unknown chat ignored", "chat", u.Message.Chat.ID)
 			return
 		}
+		if f := u.Message.media(); f != nil {
+			t.receive(b, u.Message, f)
+			return
+		}
 		b.HandleText(ctx, t, u.Message.Text)
 	case u.Callback != nil:
 		cb := u.Callback
@@ -218,6 +353,34 @@ func (t *Telegram) handle(ctx context.Context, b *Bridge, u TgUpdate) {
 	}
 }
 
+// receive saves a file from the phone in the background, so a download never
+// holds up approval taps (updates are handled one at a time).
+func (t *Telegram) receive(b *Bridge, msg *tgMessage, f *tgFile) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if f.FileSize > tgDownloadLimit {
+			_ = t.Send(ctx, fmt.Sprintf("✗ Telegram only lets bots download files up to 20 MB (this one is %.1f MB).", float64(f.FileSize)/(1<<20)))
+			return
+		}
+		b.HandleFile(ctx, t, Incoming{Name: f.FileName, Mime: f.MimeType, Size: f.FileSize, Caption: msg.Caption,
+			Open: func(ctx context.Context) (io.ReadCloser, error) { return t.client.Download(ctx, f.FileID) }})
+	}()
+}
+
+// MaxFileBytes is the Bot API upload limit.
+func (t *Telegram) MaxFileBytes() int64 { return 50 << 20 }
+
+// SendFile sends any file as a document, so photos keep their quality.
+func (t *Telegram) SendFile(ctx context.Context, f OutFile) error {
+	fields := map[string]string{"chat_id": strconv.FormatInt(t.chatID, 10)}
+	if c := strings.TrimSpace(f.Caption); c != "" {
+		fields["caption"] = html.EscapeString(model.Truncate(c, 1000))
+		fields["parse_mode"] = "HTML"
+	}
+	return t.withRetry(ctx, func() error { return t.client.Upload(ctx, "sendDocument", fields, "document", f.Name, f.Path) })
+}
+
 // Callback data: "ap:<id>:<allow|deny|auto>".
 func parseCallback(data string) (id, action string, ok bool) {
 	parts := strings.Split(data, ":")
@@ -231,11 +394,18 @@ func parseCallback(data string) (id, action string, ok bool) {
 	return "", "", false
 }
 
-// Send splits long text into Telegram-sized messages.
+// Send splits long text into Telegram-sized messages, each valid HTML on
+// its own. If Telegram still refuses the markup, the part goes as plain text
+// rather than not at all.
 func (t *Telegram) Send(ctx context.Context, text string) error {
-	for _, part := range chunk(text, 3900) {
+	for _, part := range chatfmt.SplitHTML(text, 3900) {
 		payload := map[string]any{"chat_id": t.chatID, "text": part, "parse_mode": "HTML", "disable_web_page_preview": true}
-		if err := t.withRetry(ctx, func() error { return t.client.Call(ctx, "sendMessage", payload, nil) }); err != nil {
+		err := t.withRetry(ctx, func() error { return t.client.Call(ctx, "sendMessage", payload, nil) })
+		if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+			payload = map[string]any{"chat_id": t.chatID, "text": chatfmt.PlainFromHTML(part), "disable_web_page_preview": true}
+			err = t.withRetry(ctx, func() error { return t.client.Call(ctx, "sendMessage", payload, nil) })
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -262,9 +432,15 @@ func (t *Telegram) withRetry(ctx context.Context, call func() error) error {
 	return err
 }
 
+// approvalText shows a shell command as a code block (copyable on
+// Telegram); other tools as inline code.
 func approvalText(m Markup, a *Approval) string {
+	what := m.Code(model.Truncate(a.Req.Describe(), 900))
+	if a.Req.IsShell() {
+		what = m.Pre(model.Truncate(a.Req.Command, 900), "bash")
+	}
 	return fmt.Sprintf("🔐 %s wants to run (%s)\n\n%s\n\n📁 %s · id %s",
-		m.Bold(a.Req.Agent), m.Escape(a.Req.Tool), m.Code(model.Truncate(a.Req.Describe(), 900)),
+		m.Bold(a.Req.Agent), m.Escape(a.Req.Tool), what,
 		m.Escape(shortWS(a.Req.Workspace)), m.Code(a.ID))
 }
 
@@ -311,25 +487,3 @@ func outcome(d Decision) string {
 	}
 	return "↩️ " + d.Reason
 }
-
-// chunk splits on line boundaries where possible.
-func chunk(s string, n int) []string {
-	var out []string
-	for len(s) > n {
-		cut := strings.LastIndex(s[:n], "\n")
-		if cut < n/2 {
-			cut = n
-			for cut > 0 && !isRuneStart(s[cut]) {
-				cut--
-			}
-		}
-		out = append(out, s[:cut])
-		s = strings.TrimLeft(s[cut:], "\n")
-	}
-	if s != "" {
-		out = append(out, s)
-	}
-	return out
-}
-
-func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }

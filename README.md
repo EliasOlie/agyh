@@ -40,6 +40,7 @@ Agent CLIs keep history per tool and per folder. After a few weeks you have hund
 | **Encrypted Cloud Vault** | Synchronize sessions & projects across multiple machines via S3-compatible storage (Cloudflare R2, MinIO, AWS S3, any self-hosted S3). Zero-knowledge client-side encryption (AES-256-GCM, Argon2id key with a per-vault random salt). Instant disaster recovery (`agyh sync restore`). |
 | **Remote approvals** | Agent hooks send risky commands to Telegram (inline buttons) and/or WhatsApp; the first answer wins, phone or terminal. |
 | **Autonomous mode** | One tap allows the rest of a session, while fatal commands stay blocked. |
+| **Readable on the phone** | Agent replies keep their formatting: headings, lists, links, and code blocks with a copy button on Telegram; inline code (the workspace, `agyh resume <id>`) copies with one tap. WhatsApp gets its own markup. Long replies are split without breaking a code block. |
 | **Drive agents from chat** | `/chats`, `/search`, `/show`, `/save`, `/projects`, `/new` (start a headless session in a whitelisted workspace). |
 | **WhatsApp onboarding in the terminal** | `agyh connect whatsapp` prints the pairing QR code right in your terminal. |
 | **Skills & MCP at a glance** | `agyh skills` and `agyh mcp` show which Agent Skills and MCP servers each agent has, which copies differ, and never print a secret. Read-only. |
@@ -47,10 +48,20 @@ Agent CLIs keep history per tool and per folder. After a few weeks you have hund
 
 ## Install
 
-Requires Go 1.26+ (older Go downloads the right toolchain automatically).
+On Linux and macOS, the installer downloads the latest release, checks it against the release checksums (and its GitHub build attestation, when `gh` is logged in), puts `agyh` in `~/.local/bin` and wires it into the agents it finds (Claude Code, Antigravity, Codex):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/EliasOlie/agyh/main/install.sh | sh
+# options: sh -s -- --version v0.4.0 --bin-dir ~/bin --no-hooks --service
+```
+
+`--service` also runs the bridge as a user service (systemd on Linux, launchd on macOS). Running the installer again upgrades agyh and restarts a running bridge service.
+
+With Go 1.26+ (older Go downloads the right toolchain automatically), or on Windows:
 
 ```bash
 go install github.com/EliasOlie/agyh/cmd/agyh@latest
+agyh install-hooks --apply
 agyh --version
 ```
 
@@ -120,7 +131,7 @@ agyh new claude -w @pdv -p pagamentos               # …that joins a project
 | `agyh sync [status\|push\|pull\|restore\|migrate]` | Synchronize or restore sessions with encrypted cloud vault; `migrate` re-encrypts sessions written by agyh ≤ 0.2 with the vault's own key. |
 | `agyh connect telegram\|whatsapp` | Pair a chat channel. |
 | `agyh bridge` | Run the daemon that connects hooks and chat. |
-| `agyh install-hooks claude\|agy` | Print the hook config to paste into your agent. |
+| `agyh install-hooks [claude\|agy\|codex] [--apply]` | Print the hook config, or write it into the agents' settings (backup kept; broken hooks removed). |
 | `agyh skills` | Agent Skills installed in each agent, grouped by name, with differing copies flagged. `--agent`, `--all` (include skills bundled with the agents), `--json`. |
 | `agyh skills link <skill>… --to <agents>` | Copy a skill into other agents (e.g. from Antigravity into Claude Code and Codex), or `--all --from kit` after a restore. Opt-in, tracked, never overwrites your files. `--dry-run` previews. |
 | `agyh skills unlink <skill>…` / `agyh skills links` | Remove skills agyh installed (only its own, unedited copies) / list them. |
@@ -172,12 +183,22 @@ You then talk to agyh in the **"Message yourself"** chat; every other chat is ig
 
 ### 2. Install the hooks
 
+The installer already did this. Otherwise:
+
 ```bash
-agyh install-hooks claude   # paste into ~/.claude/settings.json
-agyh install-hooks agy      # paste into your Antigravity hooks file
+agyh install-hooks --apply          # every agent found: Claude Code, Antigravity, Codex
+agyh install-hooks codex            # or just print one agent's config, to paste yourself
 ```
 
-For Claude Code this adds three hooks:
+`--apply` only replaces agyh's own hooks and keeps everything else; the previous file is saved as `*.agyh-backup`. It also removes hooks that run a program that no longer exists (a leftover hook like that makes the agent refuse every command it matches); `agyh doctor` reports them too.
+
+| Agent | File | Hooks |
+|---|---|---|
+| Claude Code | `~/.claude/settings.json` | PermissionRequest, PreToolUse (policy only), Stop |
+| Codex | `~/.codex/hooks.json` | the same three; Codex runs new hooks only after you trust them with `/hooks` |
+| Antigravity | `~/.agents/hooks.json` | PreToolUse on `run_command` (phone and terminal race), Stop |
+
+For Claude Code (and Codex) these are:
 
 - `PermissionRequest`: when Claude is about to **ask you** for permission (and only then), the request goes to your phone. In Claude's `auto`, `dontAsk` and `bypassPermissions` modes agyh stays out of the way. Without an answer in time (or with no bridge running), Claude shows its own prompt as usual.
 - `PreToolUse` on `Bash`, policy only: fatal commands are blocked in every mode, auto included, and read-only ones are let through. It never asks.
@@ -214,11 +235,27 @@ Add your own patterns in the config: `"policy": {"safe": ["^make\\s+test(\\s|$)"
 | `/ws` | Workspaces `/new` may use |
 | `/pending` · `/pendentes` | Pending approvals / Aprovações pendentes |
 | `/auto [off <id>]` | Autonomous sessions / Sessões em modo autônomo |
+| `/get <path>` · `/arquivo` | Send me a file from this machine / Receber um arquivo desta máquina |
+| *(a photo or file)* | Saved to the inbox; the next `/new` takes it along / Salvo na caixa de entrada; o próximo `/new` leva junto |
 | `/sync` · `/sincronizar` | Synchronize with cloud vault / Sincronizar com vault |
 | `/start` · `/ajuda` · `/help` | Interactive onboarding & command guide |
 | `s <id>` · `y` · `sim` · `allow` | Allow / Permitir comando |
 | `n <id>` · `nao` · `rejeitar` · `deny` | Deny / Rejeitar comando |
 | `a <id>` · `auto` · `sempre` | Allow whole session (autonomous mode) ⚡ |
+
+### Files, both ways
+
+**To your phone.** `agyh send <file>... [-m caption]` sends files to every connected chat (Telegram up to 50 MB, WhatsApp up to 100 MB). `install-hooks --apply` also installs the **agyh-send** skill for Claude Code and Codex (and the bridge offers it to Antigravity), so agents use it on their own: *"generate the brand manual as a PDF and send it to my phone"*. From the phone, `/get <path>` asks for a file.
+
+| File | What happens |
+|---|---|
+| Inside the current workspace, a configured workspace, the temp dir or `files.allow` | Sent right away |
+| Anywhere else | Waits for your approval on the phone (one approval per `agyh send`) |
+| A secret: keys (`*.pem`, `id_ed25519`…), `.env*` (not `.env.example`), credential files, anything under `.ssh`, `.aws`, `.git`, `.kube`…, agyh's own config and data | **Never sent**, whoever asks, symlinks included |
+
+Telegram bot chats are not end-to-end encrypted: what you send passes through Telegram's servers, which is why secrets are refused outright.
+
+**From your phone.** Send a photo, a PDF or any file to the bot (or to yourself on WhatsApp). agyh saves it, never executed and readable only by you, in `~/.local/share/agyh/inbox/<date>/` and replies with the path. Send `/new <prompt>` within 15 minutes and the file goes along (Claude Code also gets `--add-dir` for that folder), or put `/new …` in the file's caption to do both at once. Telegram lets bots download files up to 20 MB.
 
 ## Cloud Vault & Disaster Recovery
 
@@ -289,6 +326,7 @@ agyh can approve shell commands, so it is built to fail closed:
 - The bridge re-checks the policy itself, so even a misconfigured hook or autonomous session cannot get a fatal command approved.
 - The bot token never appears in errors or logs. Network errors from the Bot API are stripped of the URL.
 - Agent data is opened **read-only** (`mode=ro` for SQLite). agyh writes its own files (the index, the kit under `~/.local/share/agyh/kit/`) and, **only if you enable `"manage_agents": true`**, skill folders and MCP servers inside agents' configuration (`agyh skills link/install`, `agyh mcp apply`, and bridge propagation you approve on chat). It never touches a skill folder or MCP server it did not create, nor one it created that you edited since; every change is recorded in `~/.local/share/agyh/links.json` and can be undone (`agyh skills unlink`, `agyh mcp remove`). Claude Code's config is only changed through its own CLI.
+- `agyh send` and `/get` refuse secrets (keys, `.env`, credential files, `.ssh`/`.aws`/`.git`, agyh's config and data) after resolving symlinks; files outside the workspaces need your approval. Files from the phone are saved with a sanitized name, mode `0600`, never executed.
 - The vault holds your **MCP tokens** (encrypted): whoever has the bucket *and* your passphrase has them too. Use a strong passphrase; `"kit": false` keeps them out of the vault.
 
 ## Configuration
@@ -307,6 +345,7 @@ agyh can approve shell commands, so it is built to fail closed:
   "auto_propagate": false,
   "catalogs": ["github:owner/marketplace-repo"],
   "policy": { "safe": [], "fatal": [] },
+  "files": { "max_mb": 50, "allow": ["/home/you/Documents/exports"] },
   "sync": {
     "enabled": true,
     "endpoint": "https://s3.example.com",

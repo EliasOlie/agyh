@@ -30,8 +30,13 @@ import (
 // Markup formats text for one chat platform.
 type Markup interface {
 	Bold(s string) string
+	// Code is inline code (on Telegram, tapping it copies it).
 	Code(s string) string
+	// Pre is a code block (on Telegram, with a copy button).
+	Pre(s, lang string) string
 	Escape(s string) string
+	// Markdown renders an agent's Markdown reply.
+	Markdown(md string) string
 }
 
 // Channel is a chat platform the bridge talks through.
@@ -61,6 +66,11 @@ type Bridge struct {
 	ledgerPath, propagationPath string
 	propagating                 sync.Mutex
 
+	// Files: received ones land in inbox; protected dirs are never sent from.
+	inbox     string
+	protected []string
+	attached  attachments
+
 	mu       sync.RWMutex
 	channels []Channel
 }
@@ -77,6 +87,10 @@ type Options struct {
 	Homes           func() []agentkit.Home
 	LedgerPath      string
 	PropagationPath string
+	// Inbox receives files sent from the phone. Protected directories
+	// (agyh's config and data) are never sent from, the inbox excepted.
+	Inbox     string
+	Protected []string
 }
 
 func New(o Options) *Bridge {
@@ -93,6 +107,7 @@ func New(o Options) *Bridge {
 		log: o.Logger, runner: o.Runner}
 	b.vaultSync = b.runVaultSync
 	b.homes, b.ledgerPath, b.propagationPath = o.Homes, o.LedgerPath, o.PropagationPath
+	b.inbox, b.protected = o.Inbox, o.Protected
 	if b.homes == nil {
 		b.homes = agentkit.All
 	}
@@ -173,6 +188,7 @@ func (b *Bridge) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/approvals", b.handleApproval)
 	mux.HandleFunc("POST /v1/approvals/{id}/decision", b.handleExternalDecision)
 	mux.HandleFunc("POST /v1/notify", b.handleNotify)
+	mux.HandleFunc("POST /v1/files", b.handleFiles)
 	return b.auth(mux)
 }
 
@@ -269,13 +285,25 @@ func (b *Bridge) handleExternalDecision(w http.ResponseWriter, r *http.Request) 
 
 func (b *Bridge) handleNotify(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Text string `json:"text"`
+		Text     string `json:"text"`
+		Markdown bool   `json:"markdown"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil || strings.TrimSpace(in.Text) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "text required"})
 		return
 	}
-	b.Broadcast(r.Context(), func(m Markup) string { return m.Escape(in.Text) })
+	// Deliver in the background: hooks wait only a few seconds, and a slow
+	// network to Telegram (and its retries) must not cancel the message.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		b.Broadcast(ctx, func(m Markup) string {
+			if in.Markdown {
+				return m.Markdown(in.Text)
+			}
+			return m.Escape(in.Text)
+		})
+	}()
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

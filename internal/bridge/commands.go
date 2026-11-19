@@ -68,6 +68,8 @@ func init() {
 			help: "approvals waiting for you / aprovações aguardando", run: cmdPending},
 		{names: []string{"auto"}, aliases: []string{"autonomo", "autônomo"},
 			args: "[off <id>]", help: "sessions in autonomous mode / sessões em modo autônomo", run: cmdAuto},
+		{names: []string{"get", "arquivo"}, aliases: []string{"baixar", "file"},
+			args: "<path>", help: "send me a file from this machine / receber um arquivo desta máquina", run: cmdGet},
 		{names: []string{"sync", "sincronizar"},
 			help: "sync with the encrypted cloud vault / sincronizar com o vault", run: cmdSync},
 		{names: []string{"help", "ajuda"},
@@ -140,7 +142,7 @@ func cmdSync(ctx context.Context, b *Bridge, m Markup, _ string) string { return
 
 // HandleText processes one inbound chat message and replies on the same channel.
 func (b *Bridge) HandleText(ctx context.Context, ch Channel, text string) {
-	reply := b.Execute(ctx, ch.Markup(), ch.Name(), strings.TrimSpace(text))
+	reply := b.Execute(withOrigin(ctx, ch), ch.Markup(), ch.Name(), strings.TrimSpace(text))
 	if reply == "" {
 		return
 	}
@@ -241,7 +243,7 @@ func (b *Bridge) show(ctx context.Context, m Markup, ref string) string {
 	fmt.Fprintf(&sb, "%s %s\n%s · %s · %d messages\n", m.Bold("["+sess.Agent+"]"), m.Escape(sess.Title),
 		m.Escape(shortWS(sess.Workspace)), Ago(sess.UpdatedAt), sess.Messages)
 	if sess.Preview != "" {
-		sb.WriteString("\n" + m.Escape(model.Truncate(sess.Preview, 600)) + "\n")
+		sb.WriteString("\n" + m.Markdown(model.Truncate(sess.Preview, 600)) + "\n")
 	}
 	fmt.Fprintf(&sb, "\nResume: %s", m.Code("agyh resume "+sess.ShortID()))
 	return sb.String()
@@ -333,7 +335,8 @@ func (b *Bridge) newSession(ctx context.Context, m Markup, rest string) string {
 	if prompt == "" {
 		return "Usage: /new [agent] [@workspace] <prompt>"
 	}
-	argv := expandRunner(b.cfg.Runners[agent], prompt)
+	attached := b.attached.take()
+	argv := runnerArgv(b.cfg.Runners[agent], prompt, attached)
 	go func() {
 		runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
@@ -345,10 +348,14 @@ func (b *Bridge) newSession(ctx context.Context, m Markup, rest string) string {
 			if err != nil {
 				status = "❌ " + m.Bold(agent) + " failed: " + m.Escape(err.Error())
 			}
-			return fmt.Sprintf("%s in %s (%s)\n\n%s", status, m.Escape(shortWS(dir)), took, m.Escape(tail(out, 3000)))
+			return fmt.Sprintf("%s in %s (%s)\n\n%s", status, m.Escape(shortWS(dir)), took, m.Markdown(tail(out, 3000)))
 		})
 	}()
-	return fmt.Sprintf("🚀 Started %s in %s. I'll send the result here.", m.Bold(agent), m.Escape(shortWS(dir)))
+	with := ""
+	if len(attached) > 0 {
+		with = fmt.Sprintf(" with %d file(s) from your phone", len(attached))
+	}
+	return fmt.Sprintf("🚀 Started %s in %s%s. I'll send the result here.", m.Bold(agent), m.Escape(shortWS(dir)), with)
 }
 
 func (b *Bridge) defaultRunner() string {

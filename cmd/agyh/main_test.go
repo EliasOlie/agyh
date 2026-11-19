@@ -136,6 +136,7 @@ type fakeBridge struct {
 	mu       sync.Mutex
 	auth     []string
 	notified []string
+	markdown []bool
 	decided  []map[string]any
 }
 
@@ -160,10 +161,14 @@ func newFakeBridge(t *testing.T, verdict string) *fakeBridge {
 	})
 	mux.HandleFunc("POST /v1/notify", func(w http.ResponseWriter, r *http.Request) {
 		fb.record(r)
-		var in map[string]string
+		var in struct {
+			Text     string `json:"text"`
+			Markdown bool   `json:"markdown"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		fb.mu.Lock()
-		fb.notified = append(fb.notified, in["text"])
+		fb.notified = append(fb.notified, in.Text)
+		fb.markdown = append(fb.markdown, in.Markdown)
 		fb.mu.Unlock()
 	})
 	fb.srv = httptest.NewServer(mux)
@@ -420,15 +425,18 @@ func TestProjectLifecycle(t *testing.T) {
 // ---------------------------------------------------------------- hooks
 
 func TestInstallHooksPrintsValidJSON(t *testing.T) {
+	env(t)
 	for agent, want := range map[string]string{
-		"claude": "agyh hook pre-tool-use --agent claude",
+		"claude": "agyh hook pre-tool-use --agent claude --policy-only",
 		"agy":    "agyh hook pre-tool-use --agent agy",
+		"codex":  "agyh hook pre-tool-use --agent codex --policy-only",
 	} {
 		out := mustRun(t, "install-hooks", agent)
-		comment, body, ok := strings.Cut(out, "\n")
-		if !ok || !strings.HasPrefix(comment, "// Add to ") {
+		comment, rest, ok := strings.Cut(out, "\n")
+		if !ok || !strings.HasPrefix(comment, "// "+agent+": merge into ") {
 			t.Fatalf("%s: missing header: %q", agent, out)
 		}
+		body, _, _ := strings.Cut(rest, "\n\n")
 		if !json.Valid([]byte(body)) {
 			t.Fatalf("%s: body is not JSON:\n%s", agent, body)
 		}
@@ -436,8 +444,58 @@ func TestInstallHooksPrintsValidJSON(t *testing.T) {
 			t.Fatalf("%s: hook commands missing:\n%s", agent, body)
 		}
 	}
-	if _, err := run(t, "", "install-hooks", "codex"); err == nil {
+	if _, err := run(t, "", "install-hooks", "cursor"); err == nil {
 		t.Fatal("unsupported agent accepted")
+	}
+}
+
+// --apply writes every detected agent's hooks, keeps their other settings,
+// and removes hooks whose program is gone.
+func TestInstallHooksApply(t *testing.T) {
+	home, _ := env(t)
+	write := func(rel, body string) string {
+		p := filepath.Join(home, rel)
+		os.MkdirAll(filepath.Dir(p), 0o700)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	claude := write(".claude/settings.json", `{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/old/agyh hook stop --agent claude"}]}]}}`)
+	legacy := write(".gemini/config/hooks.json", `{"telegram":{"PreToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"python3 `+home+`/gone/telegram_permission.py"}]}]}}`)
+
+	out := mustRun(t, "install-hooks")
+	if !strings.Contains(out, "telegram_permission.py") || !strings.Contains(out, "agyh install-hooks --apply") {
+		t.Fatalf("the broken hook was not reported:\n%s", out)
+	}
+	out = mustRun(t, "install-hooks", "--apply")
+	for _, want := range []string{"claude", "agy", "removed a broken hook"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "codex") {
+		t.Fatalf("codex is not installed here, yet hooks were written:\n%s", out)
+	}
+	b, _ := os.ReadFile(claude)
+	if !strings.Contains(string(b), `"model": "opus"`) || strings.Contains(string(b), "/old/agyh") ||
+		strings.Count(string(b), "hook stop --agent claude") != 1 {
+		t.Fatalf("claude settings:\n%s", b)
+	}
+	if b, _ := os.ReadFile(legacy); strings.Contains(string(b), "telegram") {
+		t.Fatalf("broken agy hook kept:\n%s", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(home, ".agents", "hooks.json")); !strings.Contains(string(b), "agyh-permission") {
+		t.Fatalf("agy hooks not written:\n%s", b)
+	}
+	if _, err := os.Stat(claude + ".agyh-backup"); err != nil {
+		t.Fatal("no backup of the claude settings")
+	}
+	// Idempotent: a second run changes nothing.
+	before, _ := os.ReadFile(claude)
+	mustRun(t, "install-hooks", "--apply")
+	if after, _ := os.ReadFile(claude); string(after) != string(before) {
+		t.Fatalf("second --apply changed the file:\n%s\n---\n%s", before, after)
 	}
 }
 
@@ -590,7 +648,10 @@ func TestStopHookNotifiesAndRefreshesIndex(t *testing.T) {
 		t.Fatalf("notifications: %v", fb.notified)
 	}
 	text := fb.notified[0]
-	for _, want := range []string{"✅ claude finished in /work/pix", "Pix webhook", "idempotência", "agyh resume aaaa1111"} {
+	if !fb.markdown[0] {
+		t.Fatal("the stop notification must be sent as Markdown")
+	}
+	for _, want := range []string{"✅ **claude** finished in `/work/pix`", "_Pix webhook_", "idempotência", "`agyh resume aaaa1111`"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("notification is missing %q:\n%s", want, text)
 		}

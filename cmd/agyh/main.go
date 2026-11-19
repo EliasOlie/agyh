@@ -90,7 +90,7 @@ Run without arguments for the interactive browser.`,
 	root.Flags().StringVarP(&project, "project", "p", "", "open the browser inside one project")
 	root.AddCommand(
 		a.lsCmd(), a.searchCmd(), a.showCmd(), a.resumeCmd(), a.newCmd(), a.indexCmd(), a.projectCmd(),
-		a.hookCmd(), a.bridgeCmd(), a.connectCmd(), installHooksCmd(), a.syncCmd(), a.doctorCmd(), skillsCmd(), mcpCmd(),
+		a.hookCmd(), a.bridgeCmd(), a.connectCmd(), installHooksCmd(), sendCmd(), a.syncCmd(), a.doctorCmd(), skillsCmd(), mcpCmd(),
 	)
 	return root
 }

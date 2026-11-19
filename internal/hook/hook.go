@@ -26,6 +26,9 @@ type Request struct {
 	// PermissionMode is Claude Code's mode: default, plan, acceptEdits,
 	// auto, dontAsk or bypassPermissions ("" for other agents).
 	PermissionMode string `json:"permission_mode,omitempty"`
+	// LastMessage is the agent's final reply, when the Stop payload carries
+	// it (Codex does); otherwise it is read from the transcript.
+	LastMessage string `json:"last_message,omitempty"`
 }
 
 // IsShell reports whether the request runs a shell command (policy applies).
@@ -46,6 +49,7 @@ type claudeInput struct {
 	ToolName       string         `json:"tool_name"`
 	ToolInput      map[string]any `json:"tool_input"`
 	PermissionMode string         `json:"permission_mode"`
+	LastMessage    string         `json:"last_assistant_message"`
 }
 
 type agyInput struct {
@@ -65,13 +69,14 @@ func Parse(agent string, r io.Reader) (Request, error) {
 		return Request{}, err
 	}
 	switch agent {
-	case "claude":
+	case "claude", "codex":
+		// Codex hooks use Claude Code's payload (and its "Bash" tool name).
 		var in claudeInput
 		if err := json.Unmarshal(raw, &in); err != nil {
-			return Request{}, fmt.Errorf("parse claude hook input: %w", err)
+			return Request{}, fmt.Errorf("parse %s hook input: %w", agent, err)
 		}
 		req := Request{Agent: agent, SessionID: in.SessionID, Tool: in.ToolName, PermissionMode: in.PermissionMode,
-			Workspace: in.Cwd, TranscriptPath: in.TranscriptPath}
+			Workspace: in.Cwd, TranscriptPath: in.TranscriptPath, LastMessage: in.LastMessage}
 		if in.ToolName == "Bash" {
 			req.Command = str(in.ToolInput["command"])
 		} else {
@@ -95,7 +100,7 @@ func Parse(agent string, r io.Reader) (Request, error) {
 		}
 		return req, nil
 	}
-	return Request{}, fmt.Errorf("unsupported agent %q (use claude or agy)", agent)
+	return Request{}, fmt.Errorf("unsupported agent %q (use claude, agy or codex)", agent)
 }
 
 // Output renders a decision in the agent's expected stdout format.
@@ -104,7 +109,7 @@ func Parse(agent string, r io.Reader) (Request, error) {
 func Output(agent string, v policy.Verdict, reason string) []byte {
 	var out any
 	switch agent {
-	case "claude":
+	case "claude", "codex":
 		out = map[string]any{"hookSpecificOutput": map[string]any{
 			"hookEventName":            "PreToolUse",
 			"permissionDecision":       v.String(),
