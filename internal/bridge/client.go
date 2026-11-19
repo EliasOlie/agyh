@@ -42,9 +42,10 @@ func (c *Client) Decide(ctx context.Context, id, verdict, by string, auto bool) 
 		map[string]any{"verdict": verdict, "by": by, "auto": auto}, nil)
 }
 
-// Notify sends a message to every connected channel.
-func (c *Client) Notify(ctx context.Context, text string) error {
-	return c.do(ctx, http.MethodPost, "/v1/notify", map[string]string{"text": text}, nil)
+// Notify sends a message to every connected channel. With markdown, text is
+// rendered for each app (bold, code blocks, links); otherwise sent as is.
+func (c *Client) Notify(ctx context.Context, text string, markdown bool) error {
+	return c.do(ctx, http.MethodPost, "/v1/notify", map[string]any{"text": text, "markdown": markdown}, nil)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {

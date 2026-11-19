@@ -30,8 +30,13 @@ import (
 // Markup formats text for one chat platform.
 type Markup interface {
 	Bold(s string) string
+	// Code is inline code (on Telegram, tapping it copies it).
 	Code(s string) string
+	// Pre is a code block (on Telegram, with a copy button).
+	Pre(s, lang string) string
 	Escape(s string) string
+	// Markdown renders an agent's Markdown reply.
+	Markdown(md string) string
 }
 
 // Channel is a chat platform the bridge talks through.
@@ -269,13 +274,19 @@ func (b *Bridge) handleExternalDecision(w http.ResponseWriter, r *http.Request) 
 
 func (b *Bridge) handleNotify(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Text string `json:"text"`
+		Text     string `json:"text"`
+		Markdown bool   `json:"markdown"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil || strings.TrimSpace(in.Text) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "text required"})
 		return
 	}
-	b.Broadcast(r.Context(), func(m Markup) string { return m.Escape(in.Text) })
+	b.Broadcast(r.Context(), func(m Markup) string {
+		if in.Markdown {
+			return m.Markdown(in.Text)
+		}
+		return m.Escape(in.Text)
+	})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

@@ -161,3 +161,56 @@ func TestSendRetriesWhenTelegramFlakes(t *testing.T) {
 		t.Fatalf("send after one failure: %v (calls %d)", err, calls.Load())
 	}
 }
+
+// An agent reply with a long code block arrives formatted, split into
+// messages that each parse on their own.
+func TestTelegramSendsMarkdownInValidParts(t *testing.T) {
+	tg, ft := newTelegramTest(t, "TOKEN")
+	md := "**Pronto.** Rode:\n\n```go\n" + strings.Repeat("fmt.Println(\"a < b && c\")\n", 300) + "```\n\nfim `ok`"
+	if err := tg.Send(context.Background(), tg.Markup().Markdown(md)); err != nil {
+		t.Fatal(err)
+	}
+	calls := ft.calls["sendMessage"]
+	if len(calls) < 2 {
+		t.Fatalf("expected several messages, got %d", len(calls))
+	}
+	for i, c := range calls {
+		text := c["text"].(string)
+		if c["parse_mode"] != "HTML" || strings.Count(text, "<pre") != strings.Count(text, "</pre>") ||
+			strings.Count(text, "<code") != strings.Count(text, "</code>") {
+			t.Fatalf("message %d is not balanced HTML:\n%.200s\n…%s", i, text, text[max(0, len(text)-120):])
+		}
+	}
+	first, last := calls[0]["text"].(string), calls[len(calls)-1]["text"].(string)
+	if !strings.HasPrefix(first, "<b>Pronto.</b>") || !strings.Contains(first, `<pre><code class="language-go">`) ||
+		!strings.HasSuffix(last, "fim <code>ok</code>") {
+		t.Fatalf("first: %.120s\nlast: %s", first, last)
+	}
+}
+
+// If Telegram refuses the markup anyway, the text still gets through.
+func TestTelegramFallsBackToPlainText(t *testing.T) {
+	var got []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		got = append(got, body)
+		if body["parse_mode"] == "HTML" {
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "description": "Bad Request: can't parse entities: unsupported start tag"})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": 1}})
+	}))
+	defer srv.Close()
+	old := sendRetryDelays
+	sendRetryDelays = nil
+	t.Cleanup(func() { sendRetryDelays = old })
+	c := NewTelegramClient("TOKEN")
+	c.BaseURL = srv.URL
+	if err := NewTelegram(c, 42).Send(context.Background(), "<b>feito</b> &amp; pronto"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[1]["text"] != "feito & pronto" {
+		t.Fatalf("fallback: %v", got)
+	}
+}

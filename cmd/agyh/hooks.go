@@ -11,6 +11,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/EliasOlie/agyh/internal/bridge"
+	"github.com/EliasOlie/agyh/internal/chatfmt"
 	"github.com/EliasOlie/agyh/internal/config"
 	"github.com/EliasOlie/agyh/internal/hook"
 	"github.com/EliasOlie/agyh/internal/model"
@@ -287,19 +288,28 @@ func (a *app) notifyStop(ctx context.Context, req hook.Request) {
 			break
 		}
 	}
-	text := fmt.Sprintf("✅ %s finished in %s", req.Agent, hook.ShortenHome(firstNonEmpty(req.Workspace, sess.Workspace)))
-	if sess.Title != "" {
-		text += "\n" + sess.Title
-	}
-	if last != "" {
-		text += "\n\n" + model.Truncate(last, 1500)
-	}
-	if id := firstNonEmpty(req.SessionID, sess.ID); id != "" {
-		text += "\n\nagyh resume " + model.Session{ID: id}.ShortID()
-	}
 	nctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_ = bridge.NewClient(cfg).Notify(nctx, text)
+	_ = bridge.NewClient(cfg).Notify(nctx, stopMessage(req, sess, last), true)
+}
+
+// stopMessage is the "agent finished" notification, in Markdown: the agent's
+// reply keeps its formatting, and the workspace and resume command are code
+// (one tap copies them on Telegram).
+func stopMessage(req hook.Request, sess model.Session, last string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "✅ **%s** finished in `%s`", chatfmt.EscapeMD(req.Agent),
+		strings.ReplaceAll(hook.ShortenHome(firstNonEmpty(req.Workspace, sess.Workspace)), "`", "'"))
+	if sess.Title != "" {
+		sb.WriteString("\n_" + chatfmt.EscapeMD(model.Truncate(sess.Title, 120)) + "_")
+	}
+	if last = strings.TrimSpace(last); last != "" {
+		sb.WriteString("\n\n" + model.Truncate(last, 3000))
+	}
+	if id := firstNonEmpty(req.SessionID, sess.ID); id != "" {
+		sb.WriteString("\n\n`agyh resume " + model.Session{ID: id}.ShortID() + "`")
+	}
+	return sb.String()
 }
 
 func firstNonEmpty(vals ...string) string {

@@ -40,6 +40,7 @@ Agent CLIs keep history per tool and per folder. After a few weeks you have hund
 | **Encrypted Cloud Vault** | Synchronize sessions & projects across multiple machines via S3-compatible storage (Cloudflare R2, MinIO, AWS S3, any self-hosted S3). Zero-knowledge client-side encryption (AES-256-GCM, Argon2id key with a per-vault random salt). Instant disaster recovery (`agyh sync restore`). |
 | **Remote approvals** | Agent hooks send risky commands to Telegram (inline buttons) and/or WhatsApp; the first answer wins, phone or terminal. |
 | **Autonomous mode** | One tap allows the rest of a session, while fatal commands stay blocked. |
+| **Readable on the phone** | Agent replies keep their formatting: headings, lists, links, and code blocks with a copy button on Telegram; inline code (the workspace, `agyh resume <id>`) copies with one tap. WhatsApp gets its own markup. Long replies are split without breaking a code block. |
 | **Drive agents from chat** | `/chats`, `/search`, `/show`, `/save`, `/projects`, `/new` (start a headless session in a whitelisted workspace). |
 | **WhatsApp onboarding in the terminal** | `agyh connect whatsapp` prints the pairing QR code right in your terminal. |
 | **Skills & MCP at a glance** | `agyh skills` and `agyh mcp` show which Agent Skills and MCP servers each agent has, which copies differ, and never print a secret. Read-only. |

@@ -2,7 +2,6 @@ package bridge
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -316,19 +315,6 @@ func TestNonLoopbackAddressRejected(t *testing.T) {
 	for _, ok := range []string{"127.0.0.1:9123", "localhost:1", "[::1]:9"} {
 		if err := checkLoopback(ok); err != nil {
 			t.Fatalf("%s: %v", ok, err)
-		}
-	}
-}
-
-func TestChunk(t *testing.T) {
-	s := strings.Repeat("linha com acentuação\n", 400)
-	parts := chunk(s, 1000)
-	if len(parts) < 8 {
-		t.Fatalf("expected several chunks, got %d", len(parts))
-	}
-	for _, p := range parts {
-		if len(p) > 1000 || !json.Valid([]byte(`"`+strings.ReplaceAll(p, "\n", `\n`)+`"`)) {
-			t.Fatalf("bad chunk (len %d)", len(p))
 		}
 	}
 }

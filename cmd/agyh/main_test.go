@@ -136,6 +136,7 @@ type fakeBridge struct {
 	mu       sync.Mutex
 	auth     []string
 	notified []string
+	markdown []bool
 	decided  []map[string]any
 }
 
@@ -160,10 +161,14 @@ func newFakeBridge(t *testing.T, verdict string) *fakeBridge {
 	})
 	mux.HandleFunc("POST /v1/notify", func(w http.ResponseWriter, r *http.Request) {
 		fb.record(r)
-		var in map[string]string
+		var in struct {
+			Text     string `json:"text"`
+			Markdown bool   `json:"markdown"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		fb.mu.Lock()
-		fb.notified = append(fb.notified, in["text"])
+		fb.notified = append(fb.notified, in.Text)
+		fb.markdown = append(fb.markdown, in.Markdown)
 		fb.mu.Unlock()
 	})
 	fb.srv = httptest.NewServer(mux)
@@ -643,7 +648,10 @@ func TestStopHookNotifiesAndRefreshesIndex(t *testing.T) {
 		t.Fatalf("notifications: %v", fb.notified)
 	}
 	text := fb.notified[0]
-	for _, want := range []string{"✅ claude finished in /work/pix", "Pix webhook", "idempotência", "agyh resume aaaa1111"} {
+	if !fb.markdown[0] {
+		t.Fatal("the stop notification must be sent as Markdown")
+	}
+	for _, want := range []string{"✅ **claude** finished in `/work/pix`", "_Pix webhook_", "idempotência", "`agyh resume aaaa1111`"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("notification is missing %q:\n%s", want, text)
 		}

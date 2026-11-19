@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/EliasOlie/agyh/internal/chatfmt"
 	"github.com/EliasOlie/agyh/internal/model"
 	"github.com/EliasOlie/agyh/internal/policy"
 )
@@ -149,9 +150,11 @@ func (t *Telegram) Markup() Markup { return tgMarkup{} }
 
 type tgMarkup struct{}
 
-func (tgMarkup) Bold(s string) string   { return "<b>" + s + "</b>" }
-func (tgMarkup) Code(s string) string   { return "<code>" + html.EscapeString(s) + "</code>" }
-func (tgMarkup) Escape(s string) string { return html.EscapeString(s) }
+func (tgMarkup) Bold(s string) string      { return "<b>" + s + "</b>" }
+func (tgMarkup) Code(s string) string      { return "<code>" + html.EscapeString(s) + "</code>" }
+func (tgMarkup) Escape(s string) string    { return html.EscapeString(s) }
+func (tgMarkup) Markdown(md string) string { return chatfmt.Telegram(md) }
+func (tgMarkup) Pre(s, lang string) string { return chatfmt.TelegramPre(s, lang) }
 
 func (t *Telegram) Run(ctx context.Context, b *Bridge) error {
 	cmds := make([]map[string]string, 0, len(Commands))
@@ -231,11 +234,18 @@ func parseCallback(data string) (id, action string, ok bool) {
 	return "", "", false
 }
 
-// Send splits long text into Telegram-sized messages.
+// Send splits long text into Telegram-sized messages, each valid HTML on
+// its own. If Telegram still refuses the markup, the part goes as plain text
+// rather than not at all.
 func (t *Telegram) Send(ctx context.Context, text string) error {
-	for _, part := range chunk(text, 3900) {
+	for _, part := range chatfmt.SplitHTML(text, 3900) {
 		payload := map[string]any{"chat_id": t.chatID, "text": part, "parse_mode": "HTML", "disable_web_page_preview": true}
-		if err := t.withRetry(ctx, func() error { return t.client.Call(ctx, "sendMessage", payload, nil) }); err != nil {
+		err := t.withRetry(ctx, func() error { return t.client.Call(ctx, "sendMessage", payload, nil) })
+		if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+			payload = map[string]any{"chat_id": t.chatID, "text": chatfmt.PlainFromHTML(part), "disable_web_page_preview": true}
+			err = t.withRetry(ctx, func() error { return t.client.Call(ctx, "sendMessage", payload, nil) })
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -262,9 +272,15 @@ func (t *Telegram) withRetry(ctx context.Context, call func() error) error {
 	return err
 }
 
+// approvalText shows a shell command as a code block (copyable on
+// Telegram); other tools as inline code.
 func approvalText(m Markup, a *Approval) string {
+	what := m.Code(model.Truncate(a.Req.Describe(), 900))
+	if a.Req.IsShell() {
+		what = m.Pre(model.Truncate(a.Req.Command, 900), "bash")
+	}
 	return fmt.Sprintf("🔐 %s wants to run (%s)\n\n%s\n\n📁 %s · id %s",
-		m.Bold(a.Req.Agent), m.Escape(a.Req.Tool), m.Code(model.Truncate(a.Req.Describe(), 900)),
+		m.Bold(a.Req.Agent), m.Escape(a.Req.Tool), what,
 		m.Escape(shortWS(a.Req.Workspace)), m.Code(a.ID))
 }
 
@@ -311,25 +327,3 @@ func outcome(d Decision) string {
 	}
 	return "↩️ " + d.Reason
 }
-
-// chunk splits on line boundaries where possible.
-func chunk(s string, n int) []string {
-	var out []string
-	for len(s) > n {
-		cut := strings.LastIndex(s[:n], "\n")
-		if cut < n/2 {
-			cut = n
-			for cut > 0 && !isRuneStart(s[cut]) {
-				cut--
-			}
-		}
-		out = append(out, s[:cut])
-		s = strings.TrimLeft(s[cut:], "\n")
-	}
-	if s != "" {
-		out = append(out, s)
-	}
-	return out
-}
-
-func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }

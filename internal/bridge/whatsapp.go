@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/mdp/qrterminal/v3"
+
+	"github.com/EliasOlie/agyh/internal/chatfmt"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -117,9 +119,11 @@ func (w *WhatsApp) Markup() Markup { return waMarkup{} }
 
 type waMarkup struct{}
 
-func (waMarkup) Bold(s string) string   { return "*" + s + "*" }
-func (waMarkup) Code(s string) string   { return "`" + strings.ReplaceAll(s, "`", "'") + "`" }
-func (waMarkup) Escape(s string) string { return s }
+func (waMarkup) Bold(s string) string      { return "*" + s + "*" }
+func (waMarkup) Code(s string) string      { return "`" + strings.ReplaceAll(s, "`", "'") + "`" }
+func (waMarkup) Escape(s string) string    { return s }
+func (waMarkup) Markdown(md string) string { return chatfmt.WhatsApp(md) }
+func (waMarkup) Pre(s, _ string) string    { return chatfmt.WhatsAppPre(s) }
 
 func (w *WhatsApp) Run(ctx context.Context, b *Bridge) error {
 	w.client.AddEventHandler(func(evt any) {
@@ -163,8 +167,13 @@ func (w *WhatsApp) isSelfChat(info types.MessageInfo) bool {
 }
 
 func (w *WhatsApp) Send(ctx context.Context, text string) error {
-	for _, part := range chunk(text, 3500) {
-		resp, err := w.client.SendMessage(ctx, w.self, &waE2E.Message{Conversation: proto.String("🤖 " + part)})
+	for _, part := range chatfmt.SplitText(text, 3500) {
+		// The robot marks agyh's messages; a block or quote must start its own line.
+		sep := " "
+		if strings.HasPrefix(part, "```") || strings.HasPrefix(part, ">") {
+			sep = "\n"
+		}
+		resp, err := w.client.SendMessage(ctx, w.self, &waE2E.Message{Conversation: proto.String("🤖" + sep + part)})
 		if err != nil {
 			return err
 		}
