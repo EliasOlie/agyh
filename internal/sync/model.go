@@ -23,6 +23,9 @@ type SessionSummary struct {
 	Parent    string    `json:"parent,omitempty"`
 	// Hash fingerprints the session's projects and notes (see metaHash); "" = none.
 	Hash string `json:"hash,omitempty"`
+	// Transcript is the name of the agent's own session file stored in the
+	// vault (see transcripts.go); "" when there is none.
+	Transcript string `json:"transcript,omitempty"`
 }
 
 func (s SessionSummary) Key() string {
@@ -84,6 +87,10 @@ type StatusReport struct {
 	// LegacyEncryption: the vault still holds v1 blobs (shared-salt PBKDF2).
 	LegacyEncryption bool `json:"legacy_encryption"`
 	// Machine is this machine's kit name; KitMachines every kit snapshot in the vault.
-	Machine     string       `json:"machine"`
-	KitMachines []KitMachine `json:"kit_machines"`
+	Machine string `json:"machine"`
+	// Transcripts: sessions whose original file is in the vault, out of
+	// those of agents that keep one (Claude Code, Codex).
+	Transcripts         int          `json:"transcripts"`
+	TranscriptsPossible int          `json:"transcripts_possible"`
+	KitMachines         []KitMachine `json:"kit_machines"`
 }

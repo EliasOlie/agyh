@@ -61,6 +61,11 @@ type Bridge struct {
 	// guards against overlapping /sync commands.
 	vaultSync func(context.Context) (vaultsync.SyncResult, error)
 	syncing   atomic.Bool
+	// Automatic sync (autosync.go): kicks after sessions end, and whether
+	// the last automatic sync failed (to tell the phone once, not every time).
+	syncKick             chan struct{}
+	syncFailing          atomic.Bool
+	autoFirst, autoAfter time.Duration
 
 	homes                       func() []agentkit.Home
 	ledgerPath, propagationPath string
@@ -106,6 +111,8 @@ func New(o Options) *Bridge {
 	b := &Bridge{cfg: o.Config, store: o.Store, policy: o.Policy, approvals: NewApprovals(o.StatePath),
 		log: o.Logger, runner: o.Runner}
 	b.vaultSync = b.runVaultSync
+	b.syncKick = make(chan struct{}, 1)
+	b.autoFirst, b.autoAfter = autoSyncFirst, autoSyncAfter
 	b.homes, b.ledgerPath, b.propagationPath = o.Homes, o.LedgerPath, o.PropagationPath
 	b.inbox, b.protected = o.Inbox, o.Protected
 	if b.homes == nil {
@@ -146,6 +153,9 @@ func (b *Bridge) Serve(ctx context.Context) error {
 				b.log.Error("channel stopped", "channel", c.Name(), "err", err)
 			}
 		}(c)
+	}
+	if b.cfg.Sync.AutoSyncEnabled() {
+		go b.runAutoSync(ctx)
 	}
 	b.log.Info("bridge listening", "addr", b.cfg.Bridge.Addr, "channels", len(b.Channels()))
 	select {
@@ -292,6 +302,7 @@ func (b *Bridge) handleNotify(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "text required"})
 		return
 	}
+	b.kickSync() // only the Stop hook notifies: a session just ended
 	// Deliver in the background: hooks wait only a few seconds, and a slow
 	// network to Telegram (and its retries) must not cancel the message.
 	go func() {

@@ -185,9 +185,22 @@ old one with --machine (agyh sync status lists them).`,
 				}
 				fmt.Fprintf(w, "✓ Restored %d sessions from cloud vault into local index\n", res.Downloaded)
 				if out.Kit != nil {
-					fmt.Fprintf(w, "✓ Restored the kit of %s: %d skills, %d MCP servers, %d plugins\n  into %s\n",
-						out.Kit.Machine, out.Kit.Skills, out.Kit.MCP, out.Kit.Plugins, shortPath(out.Kit.Dir))
-					fmt.Fprintln(w, "  Your agents were not modified: their files are untouched.")
+					k := out.Kit
+					extra := ""
+					if k.ProjectSkills > 0 {
+						extra = fmt.Sprintf(" (%d inside projects)", k.ProjectSkills)
+					}
+					if k.Files > 0 {
+						extra += fmt.Sprintf(", %d agent files", k.Files)
+					}
+					fmt.Fprintf(w, "✓ Restored the kit of %s: %d skills%s, %d MCP servers, %d plugins\n  into %s\n",
+						k.Machine, k.Skills, extra, k.MCP, k.Plugins, shortPath(k.Dir))
+					fmt.Fprintln(w, "  Your agents were not modified: their files are untouched. To put things back:")
+					m := out.Kit.Machine
+					fmt.Fprintf(w, "    agyh skills link --all --from kit:%s   # global skills\n", m)
+					fmt.Fprintf(w, "    agyh kit apply --machine %s            # instructions, memories, subagents, project skills\n", m)
+					fmt.Fprintf(w, "    agyh mcp apply --all --from kit:%s     # MCP servers\n", m)
+					fmt.Fprintln(w, "    agyh resume <id>                         # reopens a Claude/Codex session from the vault")
 				}
 				return kitErr
 			})
@@ -214,7 +227,15 @@ func printKit(w io.Writer, k *sync.KitResult) {
 	if k == nil {
 		return
 	}
-	fmt.Fprintf(w, "  Kit:        %d skills (%d new), %d MCP servers, %d plugins, as %q\n", k.Skills, k.NewSkills, k.MCP, k.Plugins, k.Machine)
+	extra := ""
+	if k.ProjectSkills > 0 {
+		extra += fmt.Sprintf(", %d inside projects", k.ProjectSkills)
+	}
+	files := ""
+	if k.Files > 0 {
+		files = fmt.Sprintf(", %d agent files", k.Files)
+	}
+	fmt.Fprintf(w, "  Kit:        %d skills (%d new%s)%s, %d MCP servers, %d plugins, as %q\n", k.Skills, k.NewSkills, extra, files, k.MCP, k.Plugins, k.Machine)
 	for _, warn := range k.Warnings {
 		fmt.Fprintln(w, "  ! "+warn)
 	}
@@ -281,6 +302,13 @@ func printSyncStatus(w io.Writer, r sync.StatusReport) error {
 	if !r.LastSynced.IsZero() {
 		fmt.Fprintf(tw, "Last vault update:\t%s\n", bridge.Ago(r.LastSynced))
 	}
+	if r.TranscriptsPossible > 0 {
+		note := "resumable in their agent on any machine"
+		if r.Transcripts < r.TranscriptsPossible {
+			note = "the rest: readable, not resumable (agyh sync adds those this machine has)"
+		}
+		fmt.Fprintf(tw, "Transcripts:\t%d of %d Claude/Codex sessions (%s)\n", r.Transcripts, r.TranscriptsPossible, note)
+	}
 	fmt.Fprintf(tw, "This machine:\t%s\n", r.Machine)
 	if len(r.KitMachines) == 0 {
 		fmt.Fprintf(tw, "Kit snapshots:\tnone yet (agyh sync creates one)\n")
@@ -290,7 +318,11 @@ func printSyncStatus(w io.Writer, r sync.StatusReport) error {
 		if i == 0 {
 			label = "Kit snapshots:"
 		}
-		fmt.Fprintf(tw, "%s\t%s: %d skills, %d MCP servers, %d plugins, %s\n", label, m.Name, m.Skills, m.MCP, m.Plugins, bridge.Ago(m.UpdatedAt))
+		files := ""
+		if m.Files > 0 {
+			files = fmt.Sprintf(", %d agent files", m.Files)
+		}
+		fmt.Fprintf(tw, "%s\t%s: %d skills%s, %d MCP servers, %d plugins, %s\n", label, m.Name, m.Skills, files, m.MCP, m.Plugins, bridge.Ago(m.UpdatedAt))
 	}
 	return tw.Flush()
 }

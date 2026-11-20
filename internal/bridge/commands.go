@@ -195,7 +195,8 @@ func (b *Bridge) syncVault(_ context.Context, m Markup) string {
 			msg := fmt.Sprintf("☁️ Synced with vault: %d uploaded, %d downloaded (%d total)",
 				res.Uploaded, res.Downloaded, res.Total)
 			if res.Kit != nil {
-				msg += fmt.Sprintf("\n🧰 Kit: %d skills (%d new), %d MCP servers, %d plugins", res.Kit.Skills, res.Kit.NewSkills, res.Kit.MCP, res.Kit.Plugins)
+				msg += fmt.Sprintf("\n🧰 Kit: %d skills (%d new), %d agent files, %d MCP servers, %d plugins",
+					res.Kit.Skills, res.Kit.NewSkills, res.Kit.Files, res.Kit.MCP, res.Kit.Plugins)
 			}
 			return msg
 		})

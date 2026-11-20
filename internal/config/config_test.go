@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestSaveLoadAndPermissions(t *testing.T) {
@@ -48,5 +49,21 @@ func TestRunnerDefaultsAreMergedIntoOlderConfigs(t *testing.T) {
 	}
 	if len(c.Runners["codex"]) != 0 {
 		t.Fatalf("an explicitly empty runner stays disabled: %v", c.Runners["codex"])
+	}
+}
+
+func TestAutoSyncDefaults(t *testing.T) {
+	var s Sync
+	if s.AutoSyncEnabled() {
+		t.Fatal("auto sync without a vault")
+	}
+	s.Enabled = true
+	if !s.AutoSyncEnabled() || s.SyncInterval() != 6*time.Hour {
+		t.Fatalf("defaults: %v %v", s.AutoSyncEnabled(), s.SyncInterval())
+	}
+	off := false
+	s.AutoSync, s.Interval = &off, "1m"
+	if s.AutoSyncEnabled() || s.SyncInterval() != 15*time.Minute {
+		t.Fatalf("off / floor: %v %v", s.AutoSyncEnabled(), s.SyncInterval())
 	}
 }

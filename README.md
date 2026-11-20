@@ -263,7 +263,9 @@ Agent history is normally trapped on a single machine and lost whenever you form
 
 - **Zero-knowledge encryption**: Every session transcript and project association is compressed with `gzip` and encrypted client-side with **AES-256-GCM**. The key is derived from your passphrase with **Argon2id** (memory-hard: t=3, 64 MiB) and a **random salt unique to each vault**, so a guess computed against one vault is useless against another. The salt and KDF parameters live in a small plaintext `vault.json` (they are not secret), together with a key check that makes a wrong passphrase, or a header someone altered, fail before anything is written; parameters below a safe minimum are refused. The storage provider only ever sees ciphertext. Because anyone who obtains the bucket contents can attempt offline guesses, **use a long, random passphrase** (e.g. a 6+ word diceware phrase or a password-manager-generated secret) and keep it out of your shell history.
 - **Your agent kit comes along**: every sync also backs up this machine's **kit**: the skills you installed in each agent (their files, deduplicated by content), the plugins you use (as references, so each agent reinstalls them) and your MCP servers **with their tokens**, all encrypted like everything else. See [Agent kit](#agent-kit).
+- **Always current, on its own**: while the bridge runs, it syncs every 6 hours and a few minutes after each agent session ends (several sessions ending together give one sync). It stays quiet when things work and tells your phone once when a sync fails, and once when it works again. Set `"interval"` to change the pace, or `"auto_sync": false` to sync only by hand (`agyh sync`, `/sync`).
 - **Self-hosted & S3-compatible**: Works with Cloudflare R2, MinIO, AWS S3 or any other S3-compatible store. No SDK dependencies; pure Go implementation over AWS SigV4.
+- **Pick up where you left off, on another machine**: for Claude Code and Codex the vault also keeps each session's own file (tool calls and all), not just its text. On a new machine, `agyh resume <id>` puts that file back where the agent looks for it (never over an existing one) and reopens the session in the agent. Sessions backed up by an older agyh get their file on the next sync of the machine that has it; `agyh sync status` shows how many are covered. Antigravity keeps conversations in its own database, so its sessions from another machine can be read (`agyh show`) but not reopened. Set `"transcripts": false` to keep only the text.
 - **Local-first with Archive fallback**: Full-text search and transcript browsing stay local (0 ms latency via SQLite FTS5). If you open a session synced from another machine where local agent files don't exist, `agyh` transparently loads the transcript from its local encrypted archive cache.
 
 ```bash
@@ -295,6 +297,8 @@ A machine's **kit** is its agent environment, saved with every `agyh sync` / `ag
 | What | How it is stored |
 |---|---|
 | Skills you installed (`~/.claude/skills`, Codex's `~/.agents/skills`, …) | Each skill folder, as an encrypted archive named by its content fingerprint: the same skill on five machines is stored once, and only new or changed skills are uploaded. Dependencies a skill installs next to itself (`.venv`, `node_modules`, Playwright browsers…) are left out: a 1.4 GB skill folder backs up as 1.4 MB. |
+| Skills inside your projects (`<workspace>/.claude/skills`, `<workspace>/.agents/skills`) of every workspace agyh has seen a session in | The same way, with the workspace they belong to. Many live in git too; not all do, and a fresh machine has none. |
+| Your agents' own files: global instructions (`~/.claude/CLAUDE.md`, `~/.gemini/config/AGENTS.md`, `~/.codex/AGENTS.md`, Claude Code output styles), Claude Code memories (`~/.claude/projects/*/memory`), subagents and slash commands, Codex custom prompts | Each file encrypted and stored once by content. Session transcripts are not part of the kit (the vault keeps them with the sessions). |
 | Plugins | References only (id, version, where it came from). Plugins are reinstalled through their agent, never copied. Skills shipped inside plugins come back with the plugin. |
 | MCP servers | Every server entry exactly as each agent stores it, **tokens included**, encrypted with the vault key. |
 
@@ -307,13 +311,24 @@ Snapshots are **per machine** (named by `sync.machine`, else the hostname): rest
 ```
 ~/.local/share/agyh/kit/<machine>/
   claude/skills/<name>/     each skill, verified against its fingerprint
+  claude/project-skills/…   project skills, by workspace (never linked as global ones)
+  claude/files/…            instructions, memories, subagents, commands
   claude/mcp.json           MCP servers with their secrets (mode 0600)
   agy/…  codex/…
   plugins.json              plugins to reinstall
   kit.json                  the snapshot, without secrets
 ```
 
-Archives are checked before anything is written (only regular files with clean relative paths, size limits, and the restored folder must match the recorded fingerprint). To put the restored skills back into your agents, run `agyh skills link --all --from kit` (see [Sharing skills between agents](#sharing-skills-between-agents)). To sync conversations only, set `"kit": false` under `"sync"`.
+Archives are checked before anything is written (only regular files with clean relative paths, size limits, and the restored folder must match the recorded fingerprint). To put things back into your agents:
+
+```bash
+agyh skills link --all --from kit:old-laptop   # global skills
+agyh kit apply --machine old-laptop            # instructions, memories, subagents, commands, project skills
+agyh mcp apply --all --from kit:old-laptop     # MCP servers
+agyh resume <id>                               # reopens a Claude Code / Codex session from the vault
+```
+
+`agyh kit apply` never replaces a file: one that differs from the vault's is kept and reported, with the path of the vault's copy to compare. A project skill waits until its workspace exists (clone the repository, run it again). Paths follow a new home directory, so a different user name on the new machine is fine. `--dry-run` shows the plan. To sync conversations only, set `"kit": false` under `"sync"`.
 
 ## Security model
 
@@ -356,7 +371,10 @@ agyh can approve shell commands, so it is built to fail closed:
     "passphrase": "your-master-encryption-key",
     "prefix": "vault",
     "machine": "work-laptop",
-    "kit": true
+    "kit": true,
+    "auto_sync": true,
+    "transcripts": true,
+    "interval": "6h"
   }
 }
 ```
