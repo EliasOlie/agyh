@@ -12,11 +12,8 @@ import (
 )
 
 func TestAutoSync(t *testing.T) {
-	oldFirst, oldAfter := autoSyncFirst, autoSyncAfter
-	autoSyncFirst, autoSyncAfter = 10*time.Millisecond, 50*time.Millisecond
-	t.Cleanup(func() { autoSyncFirst, autoSyncAfter = oldFirst, oldAfter })
-
 	b, _, _, _ := newBridge(t, 5)
+	b.autoFirst, b.autoAfter = 10*time.Millisecond, 50*time.Millisecond
 	ch := newFake("telegram")
 	b.AddChannel(ch)
 	var calls atomic.Int32
@@ -30,8 +27,9 @@ func TestAutoSync(t *testing.T) {
 		return vaultsync.SyncResult{Uploaded: 1}, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go b.runAutoSync(ctx)
+	stopped := make(chan struct{})
+	defer func() { cancel(); <-stopped }()
+	go func() { b.runAutoSync(ctx); close(stopped) }()
 
 	// The first sync runs soon after start; its failure is reported once.
 	waitFor(t, func() bool { return calls.Load() == 1 })

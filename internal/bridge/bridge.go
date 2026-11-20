@@ -63,8 +63,9 @@ type Bridge struct {
 	syncing   atomic.Bool
 	// Automatic sync (autosync.go): kicks after sessions end, and whether
 	// the last automatic sync failed (to tell the phone once, not every time).
-	syncKick    chan struct{}
-	syncFailing atomic.Bool
+	syncKick             chan struct{}
+	syncFailing          atomic.Bool
+	autoFirst, autoAfter time.Duration
 
 	homes                       func() []agentkit.Home
 	ledgerPath, propagationPath string
@@ -111,6 +112,7 @@ func New(o Options) *Bridge {
 		log: o.Logger, runner: o.Runner}
 	b.vaultSync = b.runVaultSync
 	b.syncKick = make(chan struct{}, 1)
+	b.autoFirst, b.autoAfter = autoSyncFirst, autoSyncAfter
 	b.homes, b.ledgerPath, b.propagationPath = o.Homes, o.LedgerPath, o.PropagationPath
 	b.inbox, b.protected = o.Inbox, o.Protected
 	if b.homes == nil {

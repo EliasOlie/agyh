@@ -13,14 +13,14 @@ import (
 // It is quiet when things work: the phone hears about a failure once, and
 // once more when syncing works again.
 
-var (
+const (
 	autoSyncFirst = time.Minute     // first sync after the bridge starts
 	autoSyncAfter = 3 * time.Minute // after a session ends (debounced)
 )
 
 func (b *Bridge) runAutoSync(ctx context.Context) {
 	b.log.Info("automatic vault sync on", "every", b.cfg.Sync.SyncInterval().String())
-	periodic := time.NewTimer(autoSyncFirst)
+	periodic := time.NewTimer(b.autoFirst)
 	defer periodic.Stop()
 	var debounce *time.Timer
 	var debounced <-chan time.Time
@@ -30,10 +30,10 @@ func (b *Bridge) runAutoSync(ctx context.Context) {
 			return
 		case <-b.syncKick:
 			if debounce == nil {
-				debounce = time.NewTimer(autoSyncAfter)
+				debounce = time.NewTimer(b.autoAfter)
 				debounced = debounce.C
 			} else {
-				debounce.Reset(autoSyncAfter)
+				debounce.Reset(b.autoAfter)
 			}
 		case <-debounced:
 			debounce, debounced = nil, nil
