@@ -277,6 +277,19 @@ func (s *Store) AllSessions(ctx context.Context) ([]model.Session, error) {
 	return out, nil
 }
 
+// Children are the sessions an agent started from this one (subagents).
+func (s *Store) Children(ctx context.Context, agent, id string) ([]model.Session, error) {
+	hits, err := s.query(ctx, `SELECT `+colsNoProjects+`, '' FROM sessions s WHERE s.agent = ? AND s.parent = ?`, agent, id)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.Session, len(hits))
+	for i, h := range hits {
+		out[i] = h.Session
+	}
+	return out, nil
+}
+
 func unix(t time.Time) int64 {
 	if t.IsZero() {
 		return 0

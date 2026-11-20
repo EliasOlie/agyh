@@ -201,7 +201,7 @@ old one with --machine (agyh sync status lists them).`,
 					fmt.Fprintf(w, "    agyh skills link --all --from kit:%s   # global skills\n", m)
 					fmt.Fprintf(w, "    agyh kit apply --machine %s            # instructions, memories, subagents, project skills\n", m)
 					fmt.Fprintf(w, "    agyh mcp apply --all --from kit:%s     # MCP servers\n", m)
-					fmt.Fprintln(w, "    agyh resume <id>                         # reopens a Claude/Codex session from the vault")
+					fmt.Fprintln(w, "    agyh resume <id>                         # reopens a session from the vault in its agent")
 				}
 				return kitErr
 			})
@@ -315,7 +315,7 @@ func printSyncStatus(w io.Writer, r sync.StatusReport) error {
 		if r.Transcripts < r.TranscriptsPossible {
 			note = "the rest: readable, not resumable (agyh sync adds those this machine has)"
 		}
-		fmt.Fprintf(tw, "Transcripts:\t%d of %d Claude/Codex sessions (%s)\n", r.Transcripts, r.TranscriptsPossible, note)
+		fmt.Fprintf(tw, "Transcripts:\t%d of %d sessions (%s)\n", r.Transcripts, r.TranscriptsPossible, note)
 	}
 	fmt.Fprintf(tw, "This machine:\t%s\n", r.Machine)
 	if len(r.KitMachines) == 0 {

@@ -95,7 +95,7 @@ type StatusReport struct {
 	// Machine is this machine's kit name; KitMachines every kit snapshot in the vault.
 	Machine string `json:"machine"`
 	// Transcripts: sessions whose original file is in the vault, out of
-	// those of agents that keep one (Claude Code, Codex).
+	// those of agents that keep one (all three: Claude Code, Codex, Antigravity).
 	Transcripts         int          `json:"transcripts"`
 	TranscriptsPossible int          `json:"transcripts_possible"`
 	KitMachines         []KitMachine `json:"kit_machines"`

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -15,13 +16,15 @@ import (
 	"strings"
 
 	"github.com/EliasOlie/agyh/internal/model"
+	"github.com/EliasOlie/agyh/internal/source"
 )
 
 // Transcripts: a session bundle holds the conversation's text, enough to
 // search and read it anywhere. Reopening it in its agent needs the agent's
-// own file, tool calls and all, so for agents that keep one file per
-// session (Claude Code, Codex) the vault also stores that file, gzipped and
-// encrypted like everything else:
+// own file, tool calls and all, so the vault also stores that file, gzipped
+// and encrypted like everything else: Claude Code's and Codex's JSONL, and
+// Antigravity's per-conversation SQLite database (conversations/<id>.db,
+// copied with VACUUM INTO so a conversation in use is read consistently):
 //
 //	<prefix>/transcripts/<agent>/<id>.blob        small enough for one object
 //	<prefix>/transcripts/<agent>/<id>.<n>.blob    parts 1..N of a big one
@@ -32,8 +35,8 @@ import (
 // `agyh resume` puts the file back where the agent looks
 // (see source.PlaceTranscript).
 
-// transcriptAgents keep one transcript file per session.
-var transcriptAgents = []string{"claude", "codex"}
+// transcriptAgents keep one file per session that reopens it.
+var transcriptAgents = []string{"agy", "claude", "codex"}
 
 // maxTranscript caps one transcript (uncompressed).
 const maxTranscript = 256 << 20
@@ -68,11 +71,52 @@ func (r transcriptRef) apply(s *SessionSummary) {
 // hasTranscriptFile reports whether this machine has the agent's own file
 // for the session (not one restored from the vault's text).
 func hasTranscriptFile(s model.Session) bool {
-	if !slices.Contains(transcriptAgents, s.Agent) || s.Path == "" || strings.HasPrefix(s.Path, "archive:") {
-		return false
+	return slices.Contains(transcriptAgents, s.Agent) && source.TranscriptSource(s) != ""
+}
+
+// openTranscript opens the session's file for reading. A SQLite database
+// (Antigravity) is first copied with VACUUM INTO: the agent may be writing
+// it, with recent changes still in its WAL file.
+func openTranscript(s model.Session) (io.ReadCloser, string, error) {
+	p := source.TranscriptSource(s)
+	if p == "" {
+		return nil, "", os.ErrNotExist
 	}
-	fi, err := os.Stat(s.Path)
-	return err == nil && fi.Mode().IsRegular()
+	if !strings.HasSuffix(p, ".db") {
+		f, err := os.Open(p)
+		return f, filepath.Base(p), err
+	}
+	tmp, err := os.MkdirTemp("", "agyh-snapshot-*")
+	if err != nil {
+		return nil, "", err
+	}
+	snap := filepath.Join(tmp, "snapshot.db")
+	db, err := sql.Open("sqlite", "file:"+p+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err == nil {
+		_, err = db.Exec(`VACUUM INTO ?`, snap)
+		db.Close()
+	}
+	if err != nil {
+		os.RemoveAll(tmp)
+		return nil, "", fmt.Errorf("snapshot %s: %w", filepath.Base(p), err)
+	}
+	f, err := os.Open(snap)
+	if err != nil {
+		os.RemoveAll(tmp)
+		return nil, "", err
+	}
+	return removeOnClose{f, tmp}, filepath.Base(p), nil
+}
+
+type removeOnClose struct {
+	*os.File
+	dir string
+}
+
+func (r removeOnClose) Close() error {
+	err := r.File.Close()
+	os.RemoveAll(r.dir)
+	return err
 }
 
 // uploadTranscript stores the session's file. The ref is empty when there
@@ -81,7 +125,7 @@ func (e *Engine) uploadTranscript(ctx context.Context, s model.Session) (transcr
 	if !e.cfg.TranscriptsEnabled() || !hasTranscriptFile(s) {
 		return transcriptRef{}, nil
 	}
-	f, err := os.Open(s.Path)
+	f, name, err := openTranscript(s)
 	if err != nil {
 		return transcriptRef{}, err
 	}
@@ -103,7 +147,7 @@ func (e *Engine) uploadTranscript(ctx context.Context, s model.Session) (transcr
 	if err != nil {
 		return transcriptRef{}, err
 	}
-	ref := transcriptRef{Name: filepath.Base(s.Path), Parts: 1, SHA: digestOf(packed)}
+	ref := transcriptRef{Name: name, Parts: 1, SHA: digestOf(packed)}
 	put := func(key string, data []byte) error {
 		sealed, err := keys.seal(data)
 		if err != nil {

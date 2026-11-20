@@ -26,12 +26,16 @@ var (
 )
 
 // TranscriptPath is where an agent looks for a session's file when it is
-// started in dir: Claude Code by working directory, Codex by date.
+// started in dir: Claude Code by working directory, Codex by date,
+// Antigravity by conversation id (conversations/<id>.db, its own SQLite
+// database: agy rebuilds its summary index from it when the session opens).
 func TranscriptPath(s model.Session, dir, name string) (string, error) {
 	home, _ := os.UserHomeDir()
 	switch s.Agent {
 	case "claude":
 		return filepath.Join(claudeRoot(home), ClaudeProjectDir(dir), s.ID+".jsonl"), nil
+	case "agy":
+		return filepath.Join(agyRoot(home), "conversations", s.ID+".db"), nil
 	case "codex":
 		if !codexRollout.MatchString(name) || !strings.Contains(name, s.ID) {
 			name = "rollout-" + s.StartedAt.UTC().Format("2006-01-02T15-04-05") + "-" + s.ID + ".jsonl"
@@ -43,6 +47,23 @@ func TranscriptPath(s model.Session, dir, name string) (string, error) {
 		return filepath.Join(codexRoot(home), day.Format("2006"), day.Format("01"), day.Format("02"), name), nil
 	}
 	return "", fmt.Errorf("%s does not keep one file per session", s.Agent)
+}
+
+// TranscriptSource is this machine's file for a session, the one that lets
+// its agent reopen it ("" if there is none here). For Antigravity it is the
+// conversation's database, not the transcript agyh reads its text from.
+func TranscriptSource(s model.Session) string {
+	p := s.Path
+	if s.Agent == "agy" {
+		p, _ = TranscriptPath(s, "", "")
+	}
+	if p == "" || strings.HasPrefix(p, "archive:") {
+		return ""
+	}
+	if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	return p
 }
 
 // PlaceTranscript writes a session file restored from the vault where the

@@ -49,7 +49,7 @@ type Source interface {
 func All() []Source {
 	home, _ := os.UserHomeDir()
 	return []Source{
-		NewAgy(envOr("AGYH_AGY_DIR", filepath.Join(home, ".gemini", "antigravity-cli"))),
+		NewAgy(agyRoot(home)),
 		NewClaude(claudeRoot(home)),
 		NewCodex(codexRoot(home)),
 	}
@@ -70,6 +70,10 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func agyRoot(home string) string {
+	return envOr("AGYH_AGY_DIR", filepath.Join(home, ".gemini", "antigravity-cli"))
 }
 
 func claudeRoot(home string) string {

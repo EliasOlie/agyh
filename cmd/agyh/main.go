@@ -78,7 +78,7 @@ Run without arguments for the interactive browser.`,
 			}
 			switch {
 			case res.Resume != nil:
-				return resume(*res.Resume)
+				return a.resume(*res.Resume)
 			case res.New != nil:
 				n := res.New
 				return a.startSession(cmd.Context(), NewSession{Agent: n.Agent, Dir: n.Dir, Prompt: n.Prompt, Project: n.Project})
