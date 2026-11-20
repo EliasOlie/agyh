@@ -217,7 +217,7 @@ func (a *app) resumeCmd() *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "cd %s && %s\n", dir, strings.Join(argv, " "))
 				return nil
 			}
-			return resume(sess)
+			return a.resume(sess)
 		},
 	}
 	cmd.Flags().BoolVarP(&latest, "last", "c", false, "resume the most recent session")
@@ -246,16 +246,54 @@ func resolveSession(cmd *cobra.Command, st *store.Store, ref string) (model.Sess
 // resume replaces this process with the agent, inside the session's
 // workspace. A session synced from another machine first gets its file back
 // from the vault, so the agent can reopen it here.
-func resume(sess model.Session) error {
+func (a *app) resume(sess model.Session) error {
 	src := source.ByName(sess.Agent)
 	if src == nil {
 		return fmt.Errorf("unknown agent %q", sess.Agent)
 	}
 	dir, argv := src.Resume(sess)
-	if err := ensureTranscript(sess, workDir(dir)); err != nil {
+	wd := workDir(dir)
+	if err := ensureTranscript(sess, wd); err != nil {
 		return err
 	}
+	a.ensureChildren(sess, wd)
 	return launch(dir, argv)
+}
+
+// ensureChildren brings back the subagent conversations an Antigravity
+// conversation started, so the agent finds them too. Best effort: a child
+// the vault lacks is skipped, the parent still opens.
+func (a *app) ensureChildren(sess model.Session, dir string) {
+	if sess.Agent != "agy" {
+		return
+	}
+	st, err := a.open()
+	if err != nil {
+		return
+	}
+	defer st.Close()
+	seen := map[string]bool{sess.ID: true}
+	queue := []model.Session{sess}
+	for depth := 0; len(queue) > 0 && depth < 4; depth++ {
+		var next []model.Session
+		for _, p := range queue {
+			children, err := st.Children(context.Background(), p.Agent, p.ID)
+			if err != nil {
+				return
+			}
+			for _, c := range children {
+				if seen[c.ID] {
+					continue
+				}
+				seen[c.ID] = true
+				if err := ensureTranscript(c, dir); err != nil && !errors.Is(err, errOnlyText) {
+					fmt.Fprintf(os.Stderr, "agyh: subagent conversation %s: %v\n", c.ShortID(), err)
+				}
+				next = append(next, c)
+			}
+		}
+		queue = next
+	}
 }
 
 // workDir is where launch will run: dir when it still exists, else here.
@@ -276,21 +314,33 @@ var fetchTranscript = func(ctx context.Context, cfg config.Sync, agent, id strin
 	return engine.FetchTranscript(ctx, agent, id)
 }
 
+// errOnlyText: the vault has the conversation's text but not the agent's file.
+var errOnlyText = errors.New("the vault only has this session's text")
+
+// hasAgentFile reports whether the agent can reopen the session from this
+// machine's files: Antigravity needs its conversation database, Claude Code
+// and Codex their transcript (where it was, or where an earlier resume put it).
+func hasAgentFile(sess model.Session, dir string) bool {
+	if sess.Agent != "agy" && !strings.HasPrefix(sess.Path, "archive:") {
+		if _, err := os.Stat(sess.Path); err == nil {
+			return true
+		}
+	}
+	if sess.Agent == "codex" {
+		return false // its file name has a date: only its recorded path counts
+	}
+	p, err := source.TranscriptPath(sess, dir, "")
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(p)
+	return err == nil
+}
+
 // ensureTranscript makes sure the agent has the session's own file.
 func ensureTranscript(sess model.Session, dir string) error {
-	if !strings.HasPrefix(sess.Path, "archive:") {
-		if _, err := os.Stat(sess.Path); err == nil || sess.Path == "" {
-			return nil
-		}
-	}
-	if sess.Agent == "agy" {
-		return fmt.Errorf("this Antigravity conversation came from another machine. Antigravity keeps conversations in its own database, "+
-			"so agyh can show it (agyh show %s) but not reopen it in agy", sess.ShortID())
-	}
-	if p, err := source.TranscriptPath(sess, dir, ""); err == nil && sess.Agent == "claude" {
-		if _, err := os.Stat(p); err == nil {
-			return nil // already placed (an earlier resume)
-		}
+	if sess.Path == "" || hasAgentFile(sess, dir) {
+		return nil
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -300,9 +350,8 @@ func ensureTranscript(sess model.Session, dir string) error {
 	defer cancel()
 	name, data, err := fetchTranscript(ctx, cfg.Sync, sess.Agent, sess.ID)
 	if errors.Is(err, vaultsync.ErrNoTranscript) {
-		return fmt.Errorf("this session came from another machine and the vault only has its text, not %s's own file "+
-			"(it was backed up by an older agyh, and the machine that has the file has not synced since). "+
-			"Read it with: agyh show %s", sess.Agent, sess.ShortID())
+		return fmt.Errorf("%w, not %s's own file (it was backed up by an older agyh, and the machine that has the file "+
+			"has not synced since). Read it with: agyh show %s", errOnlyText, sess.Agent, sess.ShortID())
 	}
 	if err != nil {
 		return fmt.Errorf("get the session's file from the vault: %w", err)

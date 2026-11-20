@@ -3,7 +3,9 @@ package sync
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/EliasOlie/agyh/internal/config"
+	"github.com/EliasOlie/agyh/internal/model"
 )
 
 // The agent's own session file travels through the vault, including for
@@ -162,4 +165,58 @@ func noise(n int) []byte {
 		b[i] = byte(r.UintN(256))
 	}
 	return b
+}
+
+// Antigravity keeps each conversation in its own SQLite database, written
+// while the agent runs: the backup must include what still sits in the WAL.
+func TestAntigravityConversationDatabase(t *testing.T) {
+	_, cfg := newVault(t)
+	off := false
+	cfg.Kit = &off
+	ctx := context.Background()
+	id := "0d340bf7-442a-4b71-a059-bab93382aa14"
+	dir := filepath.Join(os.Getenv("HOME"), ".gemini", "antigravity-cli", "conversations")
+	os.MkdirAll(dir, 0o700)
+	live, err := sql.Open("sqlite", "file:"+filepath.Join(dir, id+".db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	live.SetMaxOpenConns(1)
+	for _, q := range []string{`PRAGMA journal_mode=WAL`, `PRAGMA wal_autocheckpoint=0`,
+		`CREATE TABLE steps (idx INTEGER PRIMARY KEY, data BLOB)`} {
+		if _, err := live.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 50 {
+		live.Exec(`INSERT INTO steps (data) VALUES (?)`, fmt.Sprintf("step %d", i))
+	}
+	if fi, err := os.Stat(filepath.Join(dir, id+".db-wal")); err != nil || fi.Size() == 0 {
+		t.Fatal("the test needs uncheckpointed writes in the WAL")
+	}
+
+	s := model.Session{Agent: "agy", ID: id, Title: "agy chat", StartedAt: base, UpdatedAt: base,
+		Path: filepath.Join(dir, "..", "brain", id, "transcript.jsonl")}
+	a := newMachine(t, cfg)
+	a.add(t, s)
+	a.sync(t)
+	if r := a.status(t); r.Transcripts != 1 {
+		t.Fatalf("agy conversation not stored: %d of %d", r.Transcripts, r.TranscriptsPossible)
+	}
+	name, data, err := newMachine(t, cfg).e.FetchTranscript(ctx, "agy", id)
+	if err != nil || name != id+".db" {
+		t.Fatalf("fetch: %q %v", name, err)
+	}
+	restored := filepath.Join(t.TempDir(), name)
+	os.WriteFile(restored, data, 0o600)
+	db, err := sql.Open("sqlite", "file:"+restored+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM steps`).Scan(&n); err != nil || n != 50 {
+		t.Fatalf("restored database has %d steps (%v), want the 50 still in the WAL", n, err)
+	}
 }

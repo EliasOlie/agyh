@@ -51,7 +51,7 @@ type Sync struct {
 	// Kit backs up skills, plugin references and MCP servers with every
 	// sync. Default true; set false to sync conversations only.
 	Kit *bool `json:"kit,omitempty"`
-	// Transcripts stores each Claude Code / Codex session's own file (tool
+	// Transcripts stores each session's own agent file (tool
 	// calls included) so `agyh resume` works on another machine. Default true.
 	Transcripts *bool `json:"transcripts,omitempty"`
 }
@@ -85,8 +85,8 @@ func (s Sync) SyncInterval() time.Duration {
 	return max(d, 15*time.Minute)
 }
 
-// TranscriptsEnabled reports whether syncs store each Claude Code / Codex
-// session's own file, so it can be reopened on another machine (default: yes).
+// TranscriptsEnabled reports whether syncs store each session's own agent
+// file, so it can be reopened on another machine (default: yes).
 func (s Sync) TranscriptsEnabled() bool { return s.Transcripts == nil || *s.Transcripts }
 
 // KitEnabled reports whether syncs include the agent kit (default: yes).
