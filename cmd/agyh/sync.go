@@ -101,6 +101,7 @@ or via AGYH_SYNC_* environment variables.`,
 				fmt.Fprintf(w, "  Downloaded: %d sessions\n", res.Downloaded)
 				fmt.Fprintf(w, "  Total:      %d sessions in vault\n", res.Total)
 				printKit(w, res.Kit)
+				printWarnings(cmd.ErrOrStderr(), res.Warnings)
 				if res.LegacyBlobs {
 					fmt.Fprintln(w, legacyHint)
 				}
@@ -268,10 +269,17 @@ func transfer(op func(*sync.Engine, context.Context) (sync.SyncResult, error), s
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), summary(res))
 		printKit(cmd.OutOrStdout(), res.Kit)
+		printWarnings(cmd.ErrOrStderr(), res.Warnings)
 		if res.LegacyBlobs {
 			fmt.Fprintln(cmd.OutOrStdout(), legacyHint)
 		}
 		return nil
+	}
+}
+
+func printWarnings(w io.Writer, warnings []string) {
+	for _, s := range warnings {
+		fmt.Fprintln(w, "! "+s)
 	}
 }
 

@@ -75,6 +75,9 @@ func (b *Bridge) autoSyncOnce(ctx context.Context, why string) {
 		return
 	}
 	b.log.Info("automatic sync", "why", why, "uploaded", res.Uploaded, "downloaded", res.Downloaded, "total", res.Total)
+	for _, w := range res.Warnings {
+		b.log.Warn("automatic sync", "warning", w)
+	}
 	if b.syncFailing.Swap(false) {
 		b.Broadcast(ctx, func(Markup) string {
 			return "☁️ Vault sync works again / Sincronização voltou a funcionar."

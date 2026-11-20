@@ -22,10 +22,11 @@ import (
 // vault is an in-memory S3 that can be slowed down (to observe concurrency)
 // and told to fail PUTs for some keys.
 type vault struct {
-	mu      gosync.Mutex
-	objects map[string][]byte
-	failPut func(key string) bool
-	delay   time.Duration
+	mu        gosync.Mutex
+	objects   map[string][]byte
+	failPut   func(key string) bool
+	maxObject int // refuse bigger PUTs with 413, like a small proxy limit
+	delay     time.Duration
 
 	inflight, maxInflight atomic.Int32
 	puts                  atomic.Int32 // session blobs
@@ -100,6 +101,10 @@ func (v *vault) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
+		if v.maxObject > 0 && len(body) > v.maxObject { // like a proxy's body size limit
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
 		if v.glitchy {
 			if v.readsSince == nil {
 				v.readsSince, v.overwritten = map[string]int{}, map[string]bool{}
