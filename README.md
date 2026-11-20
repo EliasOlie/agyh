@@ -245,7 +245,7 @@ Add your own patterns in the config: `"policy": {"safe": ["^make\\s+test(\\s|$)"
 
 ### Files, both ways
 
-**To your phone.** `agyh send <file>... [-m caption]` sends files to every connected chat (Telegram up to 50 MB, WhatsApp up to 100 MB). `install-hooks --apply` also installs the **agyh-send** skill for Claude Code and Codex (and the bridge offers it to Antigravity), so agents use it on their own: *"generate the brand manual as a PDF and send it to my phone"*. From the phone, `/get <path>` asks for a file.
+**To your phone.** `agyh send <file>... [-m caption]` sends files to every connected chat (Telegram up to 50 MB, WhatsApp up to 100 MB). `install-hooks --apply` also installs the **agyh-send** skill for Claude Code and Codex, so they use it on their own: *"generate the brand manual as a PDF and send it to my phone"*. Antigravity has no folder for user skills; add a line to `~/.gemini/config/AGENTS.md` such as *"To send me a file, run `agyh send <file> -m <caption>`"*. From the phone, `/get <path>` asks for a file.
 
 | File | What happens |
 |---|---|

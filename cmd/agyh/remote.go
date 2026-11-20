@@ -247,8 +247,9 @@ With no agent (or "all"), every agent found on this machine.
   codex   ~/.codex/hooks.json  (Codex asks you to trust new hooks: run /hooks in codex)
 
 --apply also installs the agyh-send skill (how to send files to your phone)
-for Claude Code and Codex; the bridge's skill propagation offers it to
-Antigravity. A copy you edited is left alone.`,
+for Claude Code and Codex (a copy you edited is left alone). Antigravity has
+no folder for user skills: tell it in ~/.gemini/config/AGENTS.md, e.g.
+"To send me a file, run: agyh send <file> -m <caption>".`,
 		Args:      cobra.MaximumNArgs(1),
 		ValidArgs: append([]string{"all"}, hookinstall.Agents...),
 		RunE: func(cmd *cobra.Command, args []string) error {

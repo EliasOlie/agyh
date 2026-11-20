@@ -18,7 +18,8 @@ var sendSkill []byte
 const SkillName = "agyh-send"
 
 // skillDir is where an agent reads user skills from. Antigravity has no
-// plain skills folder: the bridge's skill propagation offers it there.
+// documented folder for user skills (agyh can't install skills there at
+// all), so it gets none: README suggests a line in its AGENTS.md instead.
 func (p Paths) skillDir(agent string) string {
 	switch agent {
 	case "claude":

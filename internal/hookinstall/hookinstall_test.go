@@ -182,7 +182,7 @@ func TestSendSkill(t *testing.T) {
 		t.Fatal("user edit lost")
 	}
 	if path, _, _ := InstallSkill(p, "agy"); path != "" {
-		t.Fatal("agy has no plain skills folder: propagation offers it there")
+		t.Fatal("agy has no folder for user skills: nothing must be written")
 	}
 	if path, _, _ := InstallSkill(p, "codex"); !strings.HasSuffix(path, filepath.Join(".agents", "skills", "agyh-send", "SKILL.md")) {
 		t.Fatalf("codex: %s", path)
