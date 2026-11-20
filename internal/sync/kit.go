@@ -25,6 +25,8 @@ import (
 //
 //	<prefix>/kit/skills/<digest>.blob    one skill folder (tar), content-addressed:
 //	                                     identical skills are stored once
+//	<prefix>/kit/files/<sha256>.blob     one agent file (instructions, memory,
+//	                                     subagent, command), content-addressed
 //	<prefix>/kit/machines/<name>.blob    one machine's snapshot
 //	<prefix>/kit/index.blob              machines and stored skill digests
 //
@@ -42,6 +44,9 @@ type KitSkill struct {
 	Scope       string `json:"scope"`
 	Digest      string `json:"digest"`
 	Path        string `json:"path"` // where it lived on the machine
+	// Workspace holds a project skill (Scope project): it goes back into
+	// that workspace, never into the agent's global skills.
+	Workspace string `json:"workspace,omitempty"`
 }
 
 // KitSnapshot is one machine's agent environment.
@@ -52,6 +57,10 @@ type KitSnapshot struct {
 	Skills    []KitSkill           `json:"skills"`
 	Plugins   []agentkit.PluginRef `json:"plugins,omitempty"`
 	MCP       []agentkit.MCPEntry  `json:"mcp,omitempty"` // secrets included: never print
+	// Files: instructions, memories, subagents, commands (agentkit.AgentFile).
+	Files []agentkit.AgentFile `json:"files,omitempty"`
+	// Home was the home directory, so paths can follow a new user name.
+	Home string `json:"home,omitempty"`
 }
 
 // KitMachine summarizes one machine's latest snapshot.
@@ -61,6 +70,7 @@ type KitMachine struct {
 	Skills    int       `json:"skills"`
 	MCP       int       `json:"mcp"`
 	Plugins   int       `json:"plugins"`
+	Files     int       `json:"files,omitempty"`
 }
 
 type kitIndex struct {
@@ -68,17 +78,22 @@ type kitIndex struct {
 	// Digests of skill blobs already stored, so a sync uploads only new
 	// skills without a HEAD per skill. Losing an entry only costs a re-upload.
 	Skills map[string]bool `json:"skills"`
+	// Files: digests of agent-file blobs already stored.
+	Files map[string]bool `json:"files,omitempty"`
 }
 
 // KitResult reports a kit backup or restore.
 type KitResult struct {
-	Machine   string   `json:"machine"`
-	Skills    int      `json:"skills"`
-	NewSkills int      `json:"new_skills,omitempty"` // uploaded by this backup
-	MCP       int      `json:"mcp"`
-	Plugins   int      `json:"plugins"`
-	Dir       string   `json:"dir,omitempty"` // restore destination
-	Warnings  []string `json:"warnings,omitempty"`
+	Machine   string `json:"machine"`
+	Skills    int    `json:"skills"`
+	NewSkills int    `json:"new_skills,omitempty"` // uploaded by this backup
+	MCP       int    `json:"mcp"`
+	Plugins   int    `json:"plugins"`
+	// ProjectSkills of Skills live in a workspace; Files are agent files.
+	ProjectSkills int      `json:"project_skills,omitempty"`
+	Files         int      `json:"files,omitempty"`
+	Dir           string   `json:"dir,omitempty"` // restore destination
+	Warnings      []string `json:"warnings,omitempty"`
 }
 
 var ErrNoKit = errors.New("no kit snapshot for this machine")
@@ -150,6 +165,9 @@ func (e *Engine) kitIndex(ctx context.Context) (*kitIndex, error) {
 	if idx.Skills == nil {
 		idx.Skills = map[string]bool{}
 	}
+	if idx.Files == nil {
+		idx.Files = map[string]bool{}
+	}
 	return idx, nil
 }
 
@@ -180,7 +198,8 @@ func (e *Engine) PushKit(ctx context.Context) (KitResult, error) {
 		return KitResult{}, err
 	}
 	res := KitResult{Machine: e.machine()}
-	snap := KitSnapshot{Version: kitSnapshotVersion, Machine: res.Machine, CreatedAt: time.Now().UTC()}
+	home, _ := os.UserHomeDir()
+	snap := KitSnapshot{Version: kitSnapshotVersion, Machine: res.Machine, CreatedAt: time.Now().UTC(), Home: home}
 	warnf := func(format string, a ...any) { res.Warnings = append(res.Warnings, fmt.Sprintf(format, a...)) }
 
 	for _, h := range e.homes() {
@@ -214,8 +233,21 @@ func (e *Engine) PushKit(ctx context.Context) (KitResult, error) {
 		snap.Plugins = append(snap.Plugins, plugins...)
 	}
 
+	snap.Skills = append(snap.Skills, e.projectSkills(ctx, home, warnf)...)
+	for _, agent := range agentkit.FileAgents() {
+		files, errs := agentkit.AgentFiles(agent)
+		for _, err := range errs {
+			warnf("%s files: %v", agent, err)
+		}
+		snap.Files = append(snap.Files, files...)
+	}
+
 	idx, err := e.kitIndex(ctx)
 	if err != nil {
+		return res, err
+	}
+	if err := e.uploadAgentFiles(ctx, snap.Files, idx); err != nil {
+		_ = e.putSealed(ctx, e.kitKey("index.blob"), idx)
 		return res, err
 	}
 
@@ -274,9 +306,14 @@ func (e *Engine) PushKit(ctx context.Context) (KitResult, error) {
 	if err := e.putSealed(ctx, e.kitKey("machines", res.Machine+".blob"), &snap); err != nil {
 		return res, fmt.Errorf("save kit snapshot: %w", err)
 	}
-	res.Skills, res.MCP, res.Plugins = len(snap.Skills), len(snap.MCP), len(snap.Plugins)
+	res.Skills, res.MCP, res.Plugins, res.Files = len(snap.Skills), len(snap.MCP), len(snap.Plugins), len(snap.Files)
+	for _, s := range snap.Skills {
+		if s.Scope == agentkit.ScopeProject {
+			res.ProjectSkills++
+		}
+	}
 	idx.Machines[res.Machine] = KitMachine{Name: res.Machine, UpdatedAt: snap.CreatedAt,
-		Skills: res.Skills, MCP: res.MCP, Plugins: res.Plugins}
+		Skills: res.Skills, MCP: res.MCP, Plugins: res.Plugins, Files: res.Files}
 	if err := e.putSealed(ctx, e.kitKey("index.blob"), idx); err != nil {
 		return res, fmt.Errorf("save kit index: %w", err)
 	}
@@ -313,6 +350,11 @@ func (e *Engine) RestoreKit(ctx context.Context, machine string) (KitResult, err
 	}
 	dir := KitDir(machine)
 	res := KitResult{Machine: machine, Dir: dir, MCP: len(snap.MCP), Plugins: len(snap.Plugins)}
+	for _, s := range snap.Skills {
+		if s.Scope == agentkit.ScopeProject {
+			res.ProjectSkills++
+		}
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return res, err
 	}
@@ -330,6 +372,9 @@ func (e *Engine) RestoreKit(ctx context.Context, machine string) (KitResult, err
 			name = "skill-" + s.Digest[:12]
 		}
 		t := filepath.Join(dir, MachineName(s.Agent), "skills", name)
+		if s.Scope == agentkit.ScopeProject { // kept apart: `skills link` must never make it global
+			t = KitProjectSkillPath(dir, KitSkill{Agent: s.Agent, Workspace: s.Workspace, Name: name})
+		}
 		if used[t] { // two skills with one name in one agent
 			t += "-" + s.Digest[:12]
 		}
@@ -350,6 +395,10 @@ func (e *Engine) RestoreKit(ctx context.Context, machine string) (KitResult, err
 	})
 	res.Skills = int(restored.Load())
 	if err != nil {
+		return res, err
+	}
+
+	if res.Files, err = e.restoreAgentFiles(ctx, dir, snap.Files); err != nil {
 		return res, err
 	}
 

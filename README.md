@@ -297,6 +297,8 @@ A machine's **kit** is its agent environment, saved with every `agyh sync` / `ag
 | What | How it is stored |
 |---|---|
 | Skills you installed (`~/.claude/skills`, Codex's `~/.agents/skills`, …) | Each skill folder, as an encrypted archive named by its content fingerprint: the same skill on five machines is stored once, and only new or changed skills are uploaded. Dependencies a skill installs next to itself (`.venv`, `node_modules`, Playwright browsers…) are left out: a 1.4 GB skill folder backs up as 1.4 MB. |
+| Skills inside your projects (`<workspace>/.claude/skills`, `<workspace>/.agents/skills`) of every workspace agyh has seen a session in | The same way, with the workspace they belong to. Many live in git too; not all do, and a fresh machine has none. |
+| Your agents' own files: global instructions (`~/.claude/CLAUDE.md`, `~/.gemini/config/AGENTS.md`, `~/.codex/AGENTS.md`, Claude Code output styles), Claude Code memories (`~/.claude/projects/*/memory`), subagents and slash commands, Codex custom prompts | Each file encrypted and stored once by content. Session transcripts are not part of the kit (the vault keeps them with the sessions). |
 | Plugins | References only (id, version, where it came from). Plugins are reinstalled through their agent, never copied. Skills shipped inside plugins come back with the plugin. |
 | MCP servers | Every server entry exactly as each agent stores it, **tokens included**, encrypted with the vault key. |
 
@@ -309,13 +311,24 @@ Snapshots are **per machine** (named by `sync.machine`, else the hostname): rest
 ```
 ~/.local/share/agyh/kit/<machine>/
   claude/skills/<name>/     each skill, verified against its fingerprint
+  claude/project-skills/…   project skills, by workspace (never linked as global ones)
+  claude/files/…            instructions, memories, subagents, commands
   claude/mcp.json           MCP servers with their secrets (mode 0600)
   agy/…  codex/…
   plugins.json              plugins to reinstall
   kit.json                  the snapshot, without secrets
 ```
 
-Archives are checked before anything is written (only regular files with clean relative paths, size limits, and the restored folder must match the recorded fingerprint). To put the restored skills back into your agents, run `agyh skills link --all --from kit` (see [Sharing skills between agents](#sharing-skills-between-agents)). To sync conversations only, set `"kit": false` under `"sync"`.
+Archives are checked before anything is written (only regular files with clean relative paths, size limits, and the restored folder must match the recorded fingerprint). To put things back into your agents:
+
+```bash
+agyh skills link --all --from kit:old-laptop   # global skills
+agyh kit apply --machine old-laptop            # instructions, memories, subagents, commands, project skills
+agyh mcp apply --all --from kit:old-laptop     # MCP servers
+agyh resume <id>                               # reopens a Claude Code / Codex session from the vault
+```
+
+`agyh kit apply` never replaces a file: one that differs from the vault's is kept and reported, with the path of the vault's copy to compare. A project skill waits until its workspace exists (clone the repository, run it again). Paths follow a new home directory, so a different user name on the new machine is fine. `--dry-run` shows the plan. To sync conversations only, set `"kit": false` under `"sync"`.
 
 ## Security model
 
