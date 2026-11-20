@@ -41,7 +41,11 @@ type Sync struct {
 	SecretKey  string `json:"secret_key,omitempty"`
 	Passphrase string `json:"passphrase,omitempty"` // for client-side zero-knowledge AES-256-GCM
 	Prefix     string `json:"prefix,omitempty"`     // default: "vault"
-	AutoSync   bool   `json:"auto_sync,omitempty"`  // sync automatically in bridge daemon
+	// AutoSync lets the bridge sync on its own: every Interval, and a few
+	// minutes after an agent session ends. Default true; false turns it off.
+	AutoSync *bool `json:"auto_sync,omitempty"`
+	// Interval between automatic syncs, e.g. "6h" (default 6h, at least 15m).
+	Interval string `json:"interval,omitempty"`
 	// Machine names this machine's kit snapshot (default: hostname).
 	Machine string `json:"machine,omitempty"`
 	// Kit backs up skills, plugin references and MCP servers with every
@@ -64,6 +68,18 @@ func (f Files) MaxBytes() int64 {
 		return 50 << 20
 	}
 	return int64(f.MaxMB) << 20
+}
+
+// AutoSyncEnabled reports whether the bridge syncs on its own (default: yes).
+func (s Sync) AutoSyncEnabled() bool { return s.Enabled && (s.AutoSync == nil || *s.AutoSync) }
+
+// SyncInterval is the time between automatic syncs.
+func (s Sync) SyncInterval() time.Duration {
+	d, err := time.ParseDuration(s.Interval)
+	if err != nil || d <= 0 {
+		return 6 * time.Hour
+	}
+	return max(d, 15*time.Minute)
 }
 
 // KitEnabled reports whether syncs include the agent kit (default: yes).

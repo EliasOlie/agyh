@@ -263,6 +263,7 @@ Agent history is normally trapped on a single machine and lost whenever you form
 
 - **Zero-knowledge encryption**: Every session transcript and project association is compressed with `gzip` and encrypted client-side with **AES-256-GCM**. The key is derived from your passphrase with **Argon2id** (memory-hard: t=3, 64 MiB) and a **random salt unique to each vault**, so a guess computed against one vault is useless against another. The salt and KDF parameters live in a small plaintext `vault.json` (they are not secret), together with a key check that makes a wrong passphrase, or a header someone altered, fail before anything is written; parameters below a safe minimum are refused. The storage provider only ever sees ciphertext. Because anyone who obtains the bucket contents can attempt offline guesses, **use a long, random passphrase** (e.g. a 6+ word diceware phrase or a password-manager-generated secret) and keep it out of your shell history.
 - **Your agent kit comes along**: every sync also backs up this machine's **kit**: the skills you installed in each agent (their files, deduplicated by content), the plugins you use (as references, so each agent reinstalls them) and your MCP servers **with their tokens**, all encrypted like everything else. See [Agent kit](#agent-kit).
+- **Always current, on its own**: while the bridge runs, it syncs every 6 hours and a few minutes after each agent session ends (several sessions ending together give one sync). It stays quiet when things work and tells your phone once when a sync fails, and once when it works again. Set `"interval"` to change the pace, or `"auto_sync": false` to sync only by hand (`agyh sync`, `/sync`).
 - **Self-hosted & S3-compatible**: Works with Cloudflare R2, MinIO, AWS S3 or any other S3-compatible store. No SDK dependencies; pure Go implementation over AWS SigV4.
 - **Local-first with Archive fallback**: Full-text search and transcript browsing stay local (0 ms latency via SQLite FTS5). If you open a session synced from another machine where local agent files don't exist, `agyh` transparently loads the transcript from its local encrypted archive cache.
 
@@ -356,7 +357,9 @@ agyh can approve shell commands, so it is built to fail closed:
     "passphrase": "your-master-encryption-key",
     "prefix": "vault",
     "machine": "work-laptop",
-    "kit": true
+    "kit": true,
+    "auto_sync": true,
+    "interval": "6h"
   }
 }
 ```
