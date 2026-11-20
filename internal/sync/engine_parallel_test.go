@@ -22,11 +22,11 @@ import (
 // vault is an in-memory S3 that can be slowed down (to observe concurrency)
 // and told to fail PUTs for some keys.
 type vault struct {
-	mu      gosync.Mutex
-	objects map[string][]byte
-	failPut func(key string) bool
+	mu        gosync.Mutex
+	objects   map[string][]byte
+	failPut   func(key string) bool
 	maxObject int // refuse bigger PUTs with 413, like a small proxy limit
-	delay   time.Duration
+	delay     time.Duration
 
 	inflight, maxInflight atomic.Int32
 	puts                  atomic.Int32 // session blobs
