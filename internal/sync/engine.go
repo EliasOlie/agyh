@@ -45,6 +45,9 @@ type SyncResult struct {
 	LegacyBlobs bool `json:"legacy_blobs,omitempty"`
 	// Kit is this machine's skills/plugins/MCP backup (nil when disabled).
 	Kit *KitResult `json:"kit,omitempty"`
+	// Warnings: things that did not stop the sync (a transcript the server
+	// refused is retried next time).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // withKit backs up the kit after a successful session sync. Conversations
@@ -549,30 +552,37 @@ func each(ctx context.Context, n int, fn func(ctx context.Context, i int) error)
 
 // uploadAll uploads sessions concurrently and records each success in the
 // manifest, so a partial failure still leaves a manifest worth saving.
-func (e *Engine) uploadAll(ctx context.Context, m *Manifest, sessions []model.Session, l *localState) (int, error) {
+//
+// A transcript that fails to upload does not fail its session: the
+// conversation is safe in its bundle, and the next sync retries the file.
+func (e *Engine) uploadAll(ctx context.Context, m *Manifest, sessions []model.Session, l *localState) (int, []string, error) {
 	var mu sync.Mutex
+	var warnings []string
 	n := 0
 	err := each(ctx, len(sessions), func(ctx context.Context, i int) error {
 		s := sessions[i]
 		if err := e.UploadSession(ctx, s, l.projects, l.notes); err != nil {
 			return fmt.Errorf("upload %s: %w", s.Key(), err)
 		}
-		transcript, err := e.uploadTranscript(ctx, s)
-		if err != nil {
-			return fmt.Errorf("upload %s: %w", s.Key(), err)
-		}
+		ref, terr := e.uploadTranscript(ctx, s)
 		mu.Lock()
-		if transcript == "" { // keep the one stored earlier (e.g. by the machine that has the file)
-			transcript = m.Sessions[s.Key()].Transcript
-		}
+		defer mu.Unlock()
+		prev := m.Sessions[s.Key()]
 		sum := summaryOf(s, l.hash(s.Key()))
-		sum.Transcript = transcript
+		switch {
+		case terr != nil:
+			// Its parts may now be half old, half new: forget them.
+			warnings = append(warnings, fmt.Sprintf("%s: transcript not stored (%v); retried next sync", s.Key(), terr))
+		case ref.Name != "":
+			ref.apply(&sum)
+		default: // no local file here: keep the one another machine stored
+			sum.Transcript, sum.TranscriptParts, sum.TranscriptSHA = prev.Transcript, prev.TranscriptParts, prev.TranscriptSHA
+		}
 		m.Sessions[s.Key()] = sum
 		n++
-		mu.Unlock()
 		return nil
 	})
-	return n, err
+	return n, warnings, err
 }
 
 func countEach(ctx context.Context, items []SessionSummary, fn func(context.Context, SessionSummary) error) (int, error) {
@@ -710,13 +720,13 @@ func (e *Engine) Sync(ctx context.Context) (SyncResult, error) {
 		return ok && s.UpdatedAt.Equal(rem.UpdatedAt) && l.hash(s.Key()) == rem.Hash
 	})
 	var uploadErr error
-	res.Uploaded, uploadErr = e.uploadAll(ctx, m, toUpload, l)
+	res.Uploaded, res.Warnings, uploadErr = e.uploadAll(ctx, m, toUpload, l)
 	uploading := map[string]bool{}
 	for _, s := range toUpload {
 		uploading[s.Key()] = true
 	}
-	backfilled, backfillErr := e.backfillTranscripts(ctx, m, l, uploading)
-	uploadErr = errors.Join(uploadErr, backfillErr)
+	backfilled, backfillWarnings := e.backfillTranscripts(ctx, m, l, uploading)
+	res.Warnings = append(res.Warnings, backfillWarnings...)
 
 	localProjects, err := e.st.Projects(ctx)
 	if err != nil {
@@ -755,7 +765,7 @@ func (e *Engine) Push(ctx context.Context) (SyncResult, error) {
 	}
 	var res SyncResult
 	var uploadErr error
-	res.Uploaded, uploadErr = e.uploadAll(ctx, m, l.sessions, l)
+	res.Uploaded, res.Warnings, uploadErr = e.uploadAll(ctx, m, l.sessions, l)
 	if res.Uploaded > 0 || uploadErr == nil {
 		if err := e.saveManifest(ctx, m); err != nil {
 			return res, errors.Join(uploadErr, err)

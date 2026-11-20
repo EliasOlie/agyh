@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/EliasOlie/agyh/internal/model"
@@ -22,10 +23,14 @@ import (
 // session (Claude Code, Codex) the vault also stores that file, gzipped and
 // encrypted like everything else:
 //
-//	<prefix>/transcripts/<agent>/<id>.blob
+//	<prefix>/transcripts/<agent>/<id>.blob        small enough for one object
+//	<prefix>/transcripts/<agent>/<id>.<n>.blob    parts 1..N of a big one
 //
-// SessionSummary.Transcript records the file's name; `agyh resume` puts it
-// back where the agent looks (see source.PlaceTranscript).
+// Long sessions reach tens of MB and some S3 servers (or the proxy in front
+// of them) refuse objects that large, so big transcripts go in parts. The
+// manifest records the file's name, the number of parts and a fingerprint;
+// `agyh resume` puts the file back where the agent looks
+// (see source.PlaceTranscript).
 
 // transcriptAgents keep one transcript file per session.
 var transcriptAgents = []string{"claude", "codex"}
@@ -33,11 +38,30 @@ var transcriptAgents = []string{"claude", "codex"}
 // maxTranscript caps one transcript (uncompressed).
 const maxTranscript = 256 << 20
 
+// transcriptPart is the largest object one transcript part makes (before
+// encryption): well under the 10 MB limit common on self-hosted setups.
+var transcriptPart = 4 << 20
+
 // ErrNoTranscript: the vault has the conversation's text but not its file.
 var ErrNoTranscript = errors.New("the vault has no transcript of this session")
 
-func (e *Engine) transcriptKey(agent, id string) string {
-	return path.Join(e.cfg.Prefix, "transcripts", agent, id+".blob")
+func (e *Engine) transcriptKey(agent, id string, part int) string {
+	name := id + ".blob"
+	if part > 0 {
+		name = id + "." + strconv.Itoa(part) + ".blob"
+	}
+	return path.Join(e.cfg.Prefix, "transcripts", agent, name)
+}
+
+// transcriptRef is what the manifest records about a stored transcript.
+type transcriptRef struct {
+	Name  string
+	Parts int
+	SHA   string
+}
+
+func (r transcriptRef) apply(s *SessionSummary) {
+	s.Transcript, s.TranscriptParts, s.TranscriptSHA = r.Name, r.Parts, r.SHA
 }
 
 // hasTranscriptFile reports whether this machine has the agent's own file
@@ -50,46 +74,62 @@ func hasTranscriptFile(s model.Session) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
-// uploadTranscript stores the session's file and returns its name ("" when
-// there is nothing to store: transcripts off, another agent, no local file).
-func (e *Engine) uploadTranscript(ctx context.Context, s model.Session) (string, error) {
+// uploadTranscript stores the session's file. The ref is empty when there
+// is nothing to store: transcripts off, another agent, no local file.
+func (e *Engine) uploadTranscript(ctx context.Context, s model.Session) (transcriptRef, error) {
 	if !e.cfg.TranscriptsEnabled() || !hasTranscriptFile(s) {
-		return "", nil
+		return transcriptRef{}, nil
 	}
 	f, err := os.Open(s.Path)
 	if err != nil {
-		return "", err
+		return transcriptRef{}, err
 	}
 	defer f.Close()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	n, err := io.Copy(gz, io.LimitReader(f, maxTranscript+1))
 	if err != nil {
-		return "", fmt.Errorf("read transcript: %w", err)
+		return transcriptRef{}, fmt.Errorf("read transcript: %w", err)
 	}
 	if n > maxTranscript {
-		return "", nil // too big to keep: the text is still in the bundle
+		return transcriptRef{}, nil // too big to keep: the text is still in the bundle
 	}
 	if err := gz.Close(); err != nil {
-		return "", err
+		return transcriptRef{}, err
 	}
+	packed := buf.Bytes()
 	keys, err := e.ready(ctx, true)
 	if err != nil {
-		return "", err
+		return transcriptRef{}, err
 	}
-	sealed, err := keys.seal(buf.Bytes())
-	if err != nil {
-		return "", err
+	ref := transcriptRef{Name: filepath.Base(s.Path), Parts: 1, SHA: digestOf(packed)}
+	put := func(key string, data []byte) error {
+		sealed, err := keys.seal(data)
+		if err != nil {
+			return err
+		}
+		if err := e.s3.Put(ctx, key, sealed); err != nil {
+			return fmt.Errorf("upload transcript: %w", err)
+		}
+		return nil
 	}
-	if err := e.s3.Put(ctx, e.transcriptKey(s.Agent, s.ID), sealed); err != nil {
-		return "", fmt.Errorf("upload transcript: %w", err)
+	if len(packed) <= transcriptPart {
+		return ref, put(e.transcriptKey(s.Agent, s.ID, 0), packed)
 	}
-	return filepath.Base(s.Path), nil
+	ref.Parts = (len(packed) + transcriptPart - 1) / transcriptPart
+	for i := range ref.Parts {
+		end := min((i+1)*transcriptPart, len(packed))
+		if err := put(e.transcriptKey(s.Agent, s.ID, i+1), packed[i*transcriptPart:end]); err != nil {
+			return transcriptRef{}, fmt.Errorf("part %d of %d: %w", i+1, ref.Parts, err)
+		}
+	}
+	return ref, nil
 }
 
 // backfillTranscripts stores the files of sessions already in the vault
-// without one (backed up by an older agyh), when this machine has them.
-func (e *Engine) backfillTranscripts(ctx context.Context, m *Manifest, l *localState, skip map[string]bool) (int, error) {
+// without one (backed up by an older agyh, or refused last time), when this
+// machine has them. Failures are warnings: the next sync tries again.
+func (e *Engine) backfillTranscripts(ctx context.Context, m *Manifest, l *localState, skip map[string]bool) (int, []string) {
 	if !e.cfg.TranscriptsEnabled() {
 		return 0, nil
 	}
@@ -100,26 +140,28 @@ func (e *Engine) backfillTranscripts(ctx context.Context, m *Manifest, l *localS
 			todo = append(todo, s)
 		}
 	}
-	names := make([]string, len(todo))
-	err := each(ctx, len(todo), func(ctx context.Context, i int) error {
-		name, err := e.uploadTranscript(ctx, todo[i])
-		if err != nil {
-			return fmt.Errorf("transcript %s: %w", todo[i].Key(), err)
-		}
-		names[i] = name
+	refs := make([]transcriptRef, len(todo))
+	errs := make([]error, len(todo))
+	_ = each(ctx, len(todo), func(ctx context.Context, i int) error {
+		refs[i], errs[i] = e.uploadTranscript(ctx, todo[i])
 		return nil
 	})
 	n := 0
+	var warnings []string
 	for i, s := range todo {
-		if names[i] == "" {
+		if errs[i] != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: transcript not stored (%v); retried next sync", s.Key(), errs[i]))
+			continue
+		}
+		if refs[i].Name == "" {
 			continue
 		}
 		rem := m.Sessions[s.Key()]
-		rem.Transcript = names[i]
+		refs[i].apply(&rem)
 		m.Sessions[s.Key()] = rem
 		n++
 	}
-	return n, err
+	return n, warnings
 }
 
 // FetchTranscript downloads a session's original file from the vault.
@@ -132,12 +174,24 @@ func (e *Engine) FetchTranscript(ctx context.Context, agent, id string) (name st
 	if !ok || rem.Transcript == "" {
 		return "", nil, ErrNoTranscript
 	}
-	_, packed, err := e.getOpen(ctx, e.transcriptKey(agent, id))
+	var packed []byte
+	if rem.TranscriptParts <= 1 {
+		_, packed, err = e.getOpen(ctx, e.transcriptKey(agent, id, 0))
+	} else {
+		for i := 1; i <= rem.TranscriptParts && err == nil; i++ {
+			var part []byte
+			_, part, err = e.getOpen(ctx, e.transcriptKey(agent, id, i))
+			packed = append(packed, part...)
+		}
+	}
 	if errors.Is(err, ErrObjectNotFound) {
 		return "", nil, ErrNoTranscript
 	}
 	if err != nil {
 		return "", nil, err
+	}
+	if rem.TranscriptSHA != "" && digestOf(packed) != rem.TranscriptSHA {
+		return "", nil, errors.New("the vault's copy of this transcript is incomplete: sync again from the machine that has the session")
 	}
 	gz, err := gzip.NewReader(bytes.NewReader(packed))
 	if err != nil {

@@ -26,6 +26,12 @@ type SessionSummary struct {
 	// Transcript is the name of the agent's own session file stored in the
 	// vault (see transcripts.go); "" when there is none.
 	Transcript string `json:"transcript,omitempty"`
+	// TranscriptParts: big transcripts are stored in parts (<id>.<n>.blob),
+	// since some S3 servers refuse large objects; 0 or 1 means one blob.
+	TranscriptParts int `json:"transcript_parts,omitempty"`
+	// TranscriptSHA fingerprints the stored (gzipped) transcript, so a copy
+	// left half-written by an interrupted upload is never handed to an agent.
+	TranscriptSHA string `json:"transcript_sha,omitempty"`
 }
 
 func (s SessionSummary) Key() string {

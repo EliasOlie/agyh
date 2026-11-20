@@ -198,6 +198,9 @@ func (b *Bridge) syncVault(_ context.Context, m Markup) string {
 				msg += fmt.Sprintf("\n🧰 Kit: %d skills (%d new), %d agent files, %d MCP servers, %d plugins",
 					res.Kit.Skills, res.Kit.NewSkills, res.Kit.Files, res.Kit.MCP, res.Kit.Plugins)
 			}
+			for _, w := range res.Warnings {
+				msg += "\n⚠️ " + m.Escape(w)
+			}
 			return msg
 		})
 	}()
