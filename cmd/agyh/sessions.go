@@ -22,6 +22,7 @@ import (
 	"github.com/EliasOlie/agyh/internal/model"
 	"github.com/EliasOlie/agyh/internal/source"
 	"github.com/EliasOlie/agyh/internal/store"
+	vaultsync "github.com/EliasOlie/agyh/internal/sync"
 )
 
 type listFlags struct {
@@ -242,14 +243,76 @@ func resolveSession(cmd *cobra.Command, st *store.Store, ref string) (model.Sess
 	return sess, err
 }
 
-// resume replaces this process with the agent, inside the session's workspace.
+// resume replaces this process with the agent, inside the session's
+// workspace. A session synced from another machine first gets its file back
+// from the vault, so the agent can reopen it here.
 func resume(sess model.Session) error {
 	src := source.ByName(sess.Agent)
 	if src == nil {
 		return fmt.Errorf("unknown agent %q", sess.Agent)
 	}
 	dir, argv := src.Resume(sess)
+	if err := ensureTranscript(sess, workDir(dir)); err != nil {
+		return err
+	}
 	return launch(dir, argv)
+}
+
+// workDir is where launch will run: dir when it still exists, else here.
+func workDir(dir string) string {
+	if st, err := os.Stat(dir); dir != "" && err == nil && st.IsDir() {
+		return dir
+	}
+	wd, _ := os.Getwd()
+	return wd
+}
+
+// fetchTranscript downloads a session's file from the vault (replaceable in tests).
+var fetchTranscript = func(ctx context.Context, cfg config.Sync, agent, id string) (string, []byte, error) {
+	engine, err := vaultsync.NewEngine(cfg, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	return engine.FetchTranscript(ctx, agent, id)
+}
+
+// ensureTranscript makes sure the agent has the session's own file.
+func ensureTranscript(sess model.Session, dir string) error {
+	if !strings.HasPrefix(sess.Path, "archive:") {
+		if _, err := os.Stat(sess.Path); err == nil || sess.Path == "" {
+			return nil
+		}
+	}
+	if sess.Agent == "agy" {
+		return fmt.Errorf("this Antigravity conversation came from another machine. Antigravity keeps conversations in its own database, "+
+			"so agyh can show it (agyh show %s) but not reopen it in agy", sess.ShortID())
+	}
+	if p, err := source.TranscriptPath(sess, dir, ""); err == nil && sess.Agent == "claude" {
+		if _, err := os.Stat(p); err == nil {
+			return nil // already placed (an earlier resume)
+		}
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	name, data, err := fetchTranscript(ctx, cfg.Sync, sess.Agent, sess.ID)
+	if errors.Is(err, vaultsync.ErrNoTranscript) {
+		return fmt.Errorf("this session came from another machine and the vault only has its text, not %s's own file "+
+			"(it was backed up by an older agyh, and the machine that has the file has not synced since). "+
+			"Read it with: agyh show %s", sess.Agent, sess.ShortID())
+	}
+	if err != nil {
+		return fmt.Errorf("get the session's file from the vault: %w", err)
+	}
+	p, err := source.PlaceTranscript(sess, dir, name, data)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "agyh: restored the session's file from the vault into %s\n", hook.ShortenHome(p))
+	return nil
 }
 
 // launch replaces this process with argv, inside dir when it still exists.

@@ -265,6 +265,7 @@ Agent history is normally trapped on a single machine and lost whenever you form
 - **Your agent kit comes along**: every sync also backs up this machine's **kit**: the skills you installed in each agent (their files, deduplicated by content), the plugins you use (as references, so each agent reinstalls them) and your MCP servers **with their tokens**, all encrypted like everything else. See [Agent kit](#agent-kit).
 - **Always current, on its own**: while the bridge runs, it syncs every 6 hours and a few minutes after each agent session ends (several sessions ending together give one sync). It stays quiet when things work and tells your phone once when a sync fails, and once when it works again. Set `"interval"` to change the pace, or `"auto_sync": false` to sync only by hand (`agyh sync`, `/sync`).
 - **Self-hosted & S3-compatible**: Works with Cloudflare R2, MinIO, AWS S3 or any other S3-compatible store. No SDK dependencies; pure Go implementation over AWS SigV4.
+- **Pick up where you left off, on another machine**: for Claude Code and Codex the vault also keeps each session's own file (tool calls and all), not just its text. On a new machine, `agyh resume <id>` puts that file back where the agent looks for it (never over an existing one) and reopens the session in the agent. Sessions backed up by an older agyh get their file on the next sync of the machine that has it; `agyh sync status` shows how many are covered. Antigravity keeps conversations in its own database, so its sessions from another machine can be read (`agyh show`) but not reopened. Set `"transcripts": false` to keep only the text.
 - **Local-first with Archive fallback**: Full-text search and transcript browsing stay local (0 ms latency via SQLite FTS5). If you open a session synced from another machine where local agent files don't exist, `agyh` transparently loads the transcript from its local encrypted archive cache.
 
 ```bash
@@ -359,6 +360,7 @@ agyh can approve shell commands, so it is built to fail closed:
     "machine": "work-laptop",
     "kit": true,
     "auto_sync": true,
+    "transcripts": true,
     "interval": "6h"
   }
 }

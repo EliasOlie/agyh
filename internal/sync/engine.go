@@ -413,6 +413,14 @@ func (e *Engine) Status(ctx context.Context) (StatusReport, error) {
 		return report, err
 	}
 	report.Machine = e.machine()
+	for _, s := range m.Sessions {
+		if slices.Contains(transcriptAgents, s.Agent) {
+			report.TranscriptsPossible++
+			if s.Transcript != "" {
+				report.Transcripts++
+			}
+		}
+	}
 	return report, nil
 }
 
@@ -549,8 +557,17 @@ func (e *Engine) uploadAll(ctx context.Context, m *Manifest, sessions []model.Se
 		if err := e.UploadSession(ctx, s, l.projects, l.notes); err != nil {
 			return fmt.Errorf("upload %s: %w", s.Key(), err)
 		}
+		transcript, err := e.uploadTranscript(ctx, s)
+		if err != nil {
+			return fmt.Errorf("upload %s: %w", s.Key(), err)
+		}
 		mu.Lock()
-		m.Sessions[s.Key()] = summaryOf(s, l.hash(s.Key()))
+		if transcript == "" { // keep the one stored earlier (e.g. by the machine that has the file)
+			transcript = m.Sessions[s.Key()].Transcript
+		}
+		sum := summaryOf(s, l.hash(s.Key()))
+		sum.Transcript = transcript
+		m.Sessions[s.Key()] = sum
 		n++
 		mu.Unlock()
 		return nil
@@ -694,12 +711,18 @@ func (e *Engine) Sync(ctx context.Context) (SyncResult, error) {
 	})
 	var uploadErr error
 	res.Uploaded, uploadErr = e.uploadAll(ctx, m, toUpload, l)
+	uploading := map[string]bool{}
+	for _, s := range toUpload {
+		uploading[s.Key()] = true
+	}
+	backfilled, backfillErr := e.backfillTranscripts(ctx, m, l, uploading)
+	uploadErr = errors.Join(uploadErr, backfillErr)
 
 	localProjects, err := e.st.Projects(ctx)
 	if err != nil {
 		return res, errors.Join(uploadErr, fmt.Errorf("read local projects: %w", err))
 	}
-	if mergeProjectList(m, localProjects) || res.Uploaded > 0 || tombChanged {
+	if mergeProjectList(m, localProjects) || res.Uploaded > 0 || backfilled > 0 || tombChanged {
 		if err := e.saveManifest(ctx, m); err != nil {
 			return res, errors.Join(uploadErr, err)
 		}

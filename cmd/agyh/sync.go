@@ -281,6 +281,13 @@ func printSyncStatus(w io.Writer, r sync.StatusReport) error {
 	if !r.LastSynced.IsZero() {
 		fmt.Fprintf(tw, "Last vault update:\t%s\n", bridge.Ago(r.LastSynced))
 	}
+	if r.TranscriptsPossible > 0 {
+		note := "resumable in their agent on any machine"
+		if r.Transcripts < r.TranscriptsPossible {
+			note = "the rest: readable, not resumable (agyh sync adds those this machine has)"
+		}
+		fmt.Fprintf(tw, "Transcripts:\t%d of %d Claude/Codex sessions (%s)\n", r.Transcripts, r.TranscriptsPossible, note)
+	}
 	fmt.Fprintf(tw, "This machine:\t%s\n", r.Machine)
 	if len(r.KitMachines) == 0 {
 		fmt.Fprintf(tw, "Kit snapshots:\tnone yet (agyh sync creates one)\n")
