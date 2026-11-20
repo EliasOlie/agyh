@@ -38,9 +38,10 @@ var transcriptAgents = []string{"claude", "codex"}
 // maxTranscript caps one transcript (uncompressed).
 const maxTranscript = 256 << 20
 
-// transcriptPart is the largest object one transcript part makes (before
-// encryption): well under the 10 MB limit common on self-hosted setups.
-var transcriptPart = 4 << 20
+// transcriptPart is the size of one transcript part, before encryption
+// (which adds a header and may grow incompressible data slightly). Some
+// self-hosted S3 servers refuse objects over 4 MiB, so parts stay at 3 MiB.
+var transcriptPart = 3 << 20
 
 // ErrNoTranscript: the vault has the conversation's text but not its file.
 var ErrNoTranscript = errors.New("the vault has no transcript of this session")
